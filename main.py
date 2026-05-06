@@ -7,7 +7,17 @@ from pathlib import Path
 
 import numpy as np
 
-from cpdot_py import CircleObstacle, FormationPlanner, Map2D, PolygonObstacle, RectangleObstacle, TopologyPRM
+from cpdot_py import (
+    CircleObstacle,
+    FormationPlanner,
+    Map2D,
+    PlannerConfig,
+    PolygonObstacle,
+    RectangleObstacle,
+    TopologyPRM,
+    TrajectoryPoint,
+    full_states_to_xy_tensor,
+)
 from cpdot_py.states import CPDOT_FORMATION_ROBOTS
 from cpdot_py.geometry import resample_polyline
 from cpdot_py.metrics import collision_count, formation_similarity, path_length
@@ -180,6 +190,103 @@ def run_demo(args: argparse.Namespace) -> dict[str, float | str]:
     return metrics
 
 
+def source_aligned_robot_states(
+    scene: Map2D,
+    formation: FormationPlanner,
+) -> tuple[list[TrajectoryPoint], list[TrajectoryPoint]]:
+    """Port the C++ regular-polygon start/goal set generation."""
+    starts = []
+    goals = []
+    for offset in formation.desired_offsets:
+        start_xy = scene.start + offset
+        goal_xy = scene.goal + offset
+        starts.append(TrajectoryPoint(float(start_xy[0]), float(start_xy[1]), 0.0))
+        goals.append(TrajectoryPoint(float(goal_xy[0]), float(goal_xy[1]), 0.0))
+    return starts, goals
+
+
+def run_source_aligned_demo(args: argparse.Namespace) -> dict[str, float | str]:
+    """Run the reproduced CPDOT core chain: coarse path -> SFC -> Plan_fm."""
+    scene_seed = args.scene_seed
+    if scene_seed is None:
+        scene_seed = int(np.random.SeedSequence().entropy) % (2**32)
+    scene = build_scene(scene_seed, args.scene)
+    formation = FormationPlanner(scene, robot_count=args.robots)
+    config = PlannerConfig(
+        xy_resolution=args.source_xy_resolution,
+        theta_resolution=args.source_theta_resolution,
+        step_size=args.source_step_size,
+        grid_xy_resolution=args.source_grid_resolution,
+        min_nfe=args.source_min_nfe,
+    )
+    start_set, goal_set = source_aligned_robot_states(scene, formation)
+    guess = formation.plan_coarse_full_states(
+        start_set,
+        goal_set,
+        config=config,
+        max_search_time=args.source_coarse_time,
+        max_expansions=args.source_max_expansions,
+    )
+    result = formation.plan_fm_from_guess(
+        guess,
+        config=config,
+        max_warm_start=args.source_warm_starts,
+        initial_warm_starts=min(args.source_initial_warm_starts, args.source_warm_starts),
+        solver_maxiter=args.source_solver_maxiter,
+        enforce_cpp_early_return=args.source_strict_cpp_early_return,
+    )
+    trajectory = full_states_to_xy_tensor(result.states)
+    seed_trajectory = full_states_to_xy_tensor(guess)
+    robot_collisions = collision_count(scene, trajectory, clearance=0.03)
+    heights = formation.derive_heights_from_full_states(result.states)
+    e_max, e_avg = formation_similarity(trajectory, formation.desired_offsets)
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    figure_path = next_available_path(output_dir / "cpdot_source_result.png")
+    center_guide = np.asarray([scene.start, scene.goal], dtype=float)
+    plot_result(
+        scene,
+        [center_guide],
+        trajectory,
+        figure_path,
+        selected_guide=center_guide,
+        seed_trajectory=seed_trajectory,
+    )
+    if args.animate:
+        animate_result(scene, trajectory, next_available_path(output_dir / "cpdot_source_animation.gif"))
+    if args.show:
+        import matplotlib.pyplot as plt
+
+        ax = plot_map(scene)
+        ax.plot(center_guide[:, 0], center_guide[:, 1], "--", alpha=0.5)
+        for r in range(args.robots):
+            ax.plot(trajectory[:, r, 0], trajectory[:, r, 1], lw=2.0)
+        plt.show()
+
+    finite_heights = heights[np.isfinite(heights)]
+    finite_radii = result.height_cons_set[result.height_cons_set != -1]
+    metrics = {
+        "mode": "source",
+        "source_success": float(result.success),
+        "source_reason": result.reason,
+        "source_warm_start": float(result.warm_start),
+        "source_solve_count": float(len(result.solve_history)),
+        "source_coarse_tf": float(guess[0].tf),
+        "source_result_tf": float(result.states[0].tf),
+        "source_radius_max": float(np.max(finite_radii)) if len(finite_radii) else float("nan"),
+        "robot_collision_count": float(robot_collisions),
+        "formation_error_max": e_max,
+        "formation_error_avg": e_avg,
+        "height_min": float(np.min(finite_heights)) if len(finite_heights) else float("nan"),
+        "height_avg": float(np.mean(finite_heights)) if len(finite_heights) else float("nan"),
+        "height_constraints_hit": float(np.sum(result.height_cons >= 0.0)),
+        "scene_seed": float(scene_seed),
+        "figure_path": str(figure_path),
+    }
+    return metrics
+
+
 def guide_score(scene: Map2D, formation: FormationPlanner, path: np.ndarray, steps: int) -> float:
     """Prefer guide paths whose lifted formation is close to feasible."""
     reference = formation.initial_trajectory(resample_polyline(path, steps), steps)
@@ -201,6 +308,7 @@ def next_available_path(path: Path) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["fast", "source"], default="fast")
     parser.add_argument("--samples", type=int, default=1800)
     parser.add_argument("--robot-samples", type=int, default=450)
     parser.add_argument("--robot-resolution", type=float, default=0.65)
@@ -213,15 +321,28 @@ def main() -> None:
     parser.add_argument("--scene", choices=["source", "compact"], default="source")
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--animate", action="store_true")
+    parser.add_argument("--source-xy-resolution", type=float, default=0.5)
+    parser.add_argument("--source-theta-resolution", type=float, default=0.1)
+    parser.add_argument("--source-step-size", type=float, default=0.2)
+    parser.add_argument("--source-grid-resolution", type=float, default=1.0)
+    parser.add_argument("--source-min-nfe", type=int, default=20)
+    parser.add_argument("--source-coarse-time", type=float, default=30.0)
+    parser.add_argument("--source-max-expansions", type=int, default=200000)
+    parser.add_argument("--source-warm-starts", type=int, default=15)
+    parser.add_argument("--source-initial-warm-starts", type=int, default=5)
+    parser.add_argument("--source-solver-maxiter", type=int, default=200)
+    parser.add_argument("--source-strict-cpp-early-return", action="store_true")
     args = parser.parse_args()
 
-    metrics = run_demo(args)
+    metrics = run_source_aligned_demo(args) if args.mode == "source" else run_demo(args)
     print("CPDOT Python demo metrics")
     for key, value in metrics.items():
         if key.endswith("_seed") and isinstance(value, float):
             print(f"  {key}: {int(value)}")
         elif isinstance(value, float):
             print(f"  {key}: {value:.4f}")
+        elif isinstance(value, str) and key != "figure_path":
+            print(f"  {key}: {value}")
     print(f"Saved figure: {metrics['figure_path']}")
 
 

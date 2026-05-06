@@ -72,6 +72,10 @@ Aligned with the C++ code:
   after coarse path generation: per-robot SFC construction, height-constraint
   extraction, `GenerateDesiredRP` radius updates, repeated `SolveFm` calls, and
   infeasibility/radius checks.
+- `main.py --mode source` now runs the reproduced source-aligned chain:
+  C++ regular-polygon robot start/goal generation, per-robot Hybrid A* coarse
+  planning, C++-style path resampling, DecompROS-style SFC generation, and the
+  `Plan_fm` warm-start loop. It does not call the fast XY smoother.
 - Formation similarity uses the same ring-adjacency normalized Laplacian shape
   metric used by the C++ reporting code.
 
@@ -92,9 +96,8 @@ Current mismatches found by source review:
   available in the current Python environment. Python does not substitute a
   different connector; it runs the same Hybrid A* expansion and leaves one-shot
   disabled unless a compatible connector is supplied later.
-- The standalone demo still defaults to the fast XY smoother for portability;
-  the source-aligned `plan_fm_from_guess` path is available separately and is
-  covered by tests.
+- The standalone demo still defaults to the fast XY smoother for portability.
+  Use `--mode source` for the current source-aligned reproduced core pipeline.
 - The command-line staged interface, YAML scene loading, metrics JSON output,
   and unicycle/diff-drive simulation from the implementation guide are not yet
   complete.
@@ -103,11 +106,9 @@ Near-term implementation plan:
 
 1. Add or vendor a Python-compatible OMPL Dubins/Reeds-Shepp connector for the
    C++ one-shot path, without replacing it with a different shortcut algorithm.
-2. Wire `plan_coarse_full_states -> plan_fm_from_guess` into a source-aligned CLI
-   path separate from the fast demo.
-3. Add fixture-based comparisons against selected C++ YAML trajectories and
+2. Add fixture-based comparisons against selected C++ YAML trajectories and
    corridor half-spaces.
-4. Decide whether to keep documenting the two C++ source-level issues above or
+3. Decide whether to keep documenting the two C++ source-level issues above or
    preserve them behind strict compatibility flags only.
 
 ## Environment
@@ -167,10 +168,13 @@ Optional:
 conda run -n cpdot-py python main.py --show
 conda run -n cpdot-py python main.py --animate
 conda run -n cpdot-py python main.py --scene-seed 42
+conda run -n cpdot-py python main.py --mode source --scene-seed 0 --robots 3 \
+  --source-step-size 0.35 --source-warm-starts 1 \
+  --source-initial-warm-starts 1 --source-solver-maxiter 0
 ```
 
-The default demo keeps the CPDOT structure but still uses a lightweight Python
-smoother for runtime. The source-level NLP reproduction is available through
-`cpdot_py.generate_sfc`, `cpdot_py.solve_fm`,
+The default fast demo keeps the CPDOT structure but still uses a lightweight
+Python smoother for runtime. The source-aligned CLI path uses
+`cpdot_py.CoarsePathPlanner`, `cpdot_py.generate_sfc`, `cpdot_py.solve_fm`,
 `cpdot_py.FormationNLPProblem`, and
 `cpdot_py.FormationPlanner.plan_fm_from_guess`.

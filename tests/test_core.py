@@ -21,7 +21,7 @@ from cpdot_py.geometry import resample_polyline
 from cpdot_py.metrics import collision_count, formation_similarity, ring_adjacency
 from cpdot_py.optimizer import FormationNLPProblem, PlannerConfig
 from cpdot_py.states import Constraints, FullStates, TrajectoryPoint
-from main import build_scene, next_available_path
+from main import build_scene, next_available_path, source_aligned_robot_states
 
 
 def test_collision_segment_circle():
@@ -285,3 +285,16 @@ def test_formation_planner_generates_aligned_coarse_full_states():
     assert guesses[0].tf == guesses[1].tf
     np.testing.assert_allclose(guesses[0].states[0].xy(), [1.0, 1.0], atol=0.5)
     assert np.linalg.norm(guesses[0].states[-1].xy() - np.array([5.0, 1.0])) < 0.8
+
+
+def test_source_aligned_robot_states_match_cpp_regular_polygon():
+    scene = Map2D(60, 34, [], (15, 17), (45, 17))
+    planner = FormationPlanner(scene, robot_count=5)
+    starts, goals = source_aligned_robot_states(scene, planner)
+    assert len(starts) == 5
+    assert len(goals) == 5
+    for index, offset in enumerate(planner.desired_offsets):
+        np.testing.assert_allclose(starts[index].xy(), scene.start + offset)
+        np.testing.assert_allclose(goals[index].xy(), scene.goal + offset)
+        assert starts[index].theta == 0.0
+        assert goals[index].theta == 0.0
