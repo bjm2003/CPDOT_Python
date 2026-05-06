@@ -7,6 +7,7 @@ import heapq
 
 import numpy as np
 
+from .coarse_path_planner import CoarsePathPlanner, Pose2D, poses_to_array
 from .env import CircleObstacle, Map2D, PolygonObstacle, RectangleObstacle
 from .forward_kinematics import ForwardKinematics
 from .geometry import headings_from_path, resample_polyline
@@ -270,6 +271,68 @@ class FormationPlanner:
             hpolys, _, _ = generate_sfc(path, self.map2d, bbox_width=bbox_width)
             corridors.append(hpolys)
         return corridors
+
+    def plan_coarse_full_states(
+        self,
+        start_set: list[TrajectoryPoint],
+        goal_set: list[TrajectoryPoint],
+        *,
+        hyperparam_sets: list[list[list[list[float]]]] | None = None,
+        config: PlannerConfig | None = None,
+        max_search_time: float = 30.0,
+        max_expansions: int = 200000,
+    ) -> list[FullStates]:
+        """Port the coarse-guess generation block in C++ ``Plan_fm``."""
+        cfg = PlannerConfig() if config is None else config
+        if len(start_set) != len(goal_set):
+            raise ValueError("start_set and goal_set must have the same length")
+        if hyperparam_sets is None:
+            hyperparam_sets = [[] for _ in start_set]
+        if len(hyperparam_sets) != len(start_set):
+            raise ValueError("hyperparam_sets must match robot count")
+
+        initial_plan_set: list[np.ndarray] = []
+        guess: list[FullStates] = []
+        for start, goal, hyper in zip(start_set, goal_set, hyperparam_sets):
+            planner = CoarsePathPlanner(
+                self.map2d,
+                cfg,
+                max_search_time=max_search_time,
+                max_expansions=max_expansions,
+            )
+            path = planner.plan(
+                Pose2D(start.x, start.y, start.theta),
+                Pose2D(goal.x, goal.y, goal.theta),
+                hyper,
+            )
+            if not path:
+                raise RuntimeError("coarse path planner failed")
+            path_array = poses_to_array(path)
+            initial_plan_set.append(path_array)
+            guess.append(resample_path_to_full_states(path_array, config=cfg))
+
+        tf_max = max(full.tf for full in guess)
+        tf_max_ind = int(np.argmax([full.tf for full in guess]))
+        target_steps = len(guess[tf_max_ind].states)
+        aligned: list[FullStates] = []
+        for i, full in enumerate(guess):
+            if i == tf_max_ind:
+                aligned_full = full
+            else:
+                aligned_full = resample_path_to_full_states(
+                    initial_plan_set[i],
+                    step_num=target_steps,
+                    ratio=True,
+                    config=cfg,
+                )
+                ratio_value = aligned_full.tf / max(tf_max, 1e-9)
+                for state in aligned_full.states:
+                    state.v *= ratio_value
+                    state.a *= ratio_value
+                    state.omega *= ratio_value
+            aligned_full.tf = tf_max
+            aligned.append(aligned_full)
+        return aligned
 
     def generate_height_cons(self, guess: list[FullStates]) -> np.ndarray:
         """Port C++ ``FormationPlanner::GenerateHeightCons``."""

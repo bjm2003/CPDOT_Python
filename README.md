@@ -20,6 +20,9 @@ Implemented pieces:
   `formation_planner/forward_kinematics.cpp`.
 - C++-style path resampling/time profiling and a SciPy-backed `SolveFm`
   counterpart for the joint formation penalty NLP.
+- Hybrid A* coarse path planning from `CoarsePathPlanner`, including 3D grid
+  nodes, 2D DP heuristic, kinematic vehicle expansion, disc-box collision
+  checking, costs, and homotopy half-space filtering.
 - DecompROS-style safe flight corridor generation from
   `Environment::generateSFC`.
 - `Plan_fm` core warm-start loop around joint `SolveFm`, operating on Python
@@ -53,6 +56,14 @@ Aligned with the C++ code:
 - `resample_path_to_full_states` ports C++ `FormationPlanner::ResamplePath`,
   including time profile, velocity, steering, acceleration, and steering-rate
   fields.
+- `CoarsePathPlanner` ports the C++ Hybrid A* body: `Node3d`/`Node2d`
+  discretization, 8-neighbor 2D heuristic, steering primitive expansion,
+  gear/steering penalties, vehicle disc collision checks, and
+  `CheckHomotopyConstraints`.
+- `FormationPlanner.plan_coarse_full_states` reproduces the C++ coarse-guess
+  block before `Plan_fm`: per-robot coarse planning, path resampling, selecting
+  the maximum-`tf` trajectory, and aligning all robot trajectories to the same
+  `tf`/`nfe`.
 - `generate_sfc` ports the DecompROS 2D ellipsoid corridor path used by
   `Environment::generateSFC`: obstacle edge interpolation, local bounding boxes,
   ellipsoid shrinkage around obstacle points, closest separating hyperplanes,
@@ -77,8 +88,10 @@ Current mismatches found by source review:
 - The C++ `SolveFm` safe-corridor residual appears to use `cos(theta)` in the
   first disc's y-coordinate expression; Python keeps the algorithmically
   consistent `GetDiscPositions` formula used elsewhere in the C++ source.
-- Coarse path generation is not yet a direct port of `CoarsePathPlanner`; the
-  source-aligned `plan_fm_from_guess` starts after coarse guesses already exist.
+- The C++ coarse planner's OMPL Dubins/Reeds-Shepp one-shot connector is not
+  available in the current Python environment. Python does not substitute a
+  different connector; it runs the same Hybrid A* expansion and leaves one-shot
+  disabled unless a compatible connector is supplied later.
 - The standalone demo still defaults to the fast XY smoother for portability;
   the source-aligned `plan_fm_from_guess` path is available separately and is
   covered by tests.
@@ -88,10 +101,10 @@ Current mismatches found by source review:
 
 Near-term implementation plan:
 
-1. Port or replace the remaining coarse path planner gap so Python can produce
-   the same pre-`Plan_fm` full-state guesses as CPDOT.
-2. Add a CLI flag to run the source-aligned `plan_fm_from_guess` path separately
-   from the fast demo.
+1. Add or vendor a Python-compatible OMPL Dubins/Reeds-Shepp connector for the
+   C++ one-shot path, without replacing it with a different shortcut algorithm.
+2. Wire `plan_coarse_full_states -> plan_fm_from_guess` into a source-aligned CLI
+   path separate from the fast demo.
 3. Add fixture-based comparisons against selected C++ YAML trajectories and
    corridor half-spaces.
 4. Decide whether to keep documenting the two C++ source-level issues above or

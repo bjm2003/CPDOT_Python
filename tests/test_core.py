@@ -2,13 +2,16 @@ import numpy as np
 
 from cpdot_py import (
     CircleObstacle,
+    CoarsePathPlanner,
     FormationPlanner,
     Map2D,
+    Pose2D,
     RectangleObstacle,
     TopologyPRM,
     generate_desired_rp,
     generate_optimal_time_profile_segment,
     generate_sfc,
+    poses_to_array,
     resample_path_to_full_states,
     solve_fm,
     xy_tensor_to_full_states,
@@ -237,3 +240,48 @@ def test_plan_fm_from_guess_runs_cpp_core_loop_smoke():
     assert result.warm_start == 1
     assert len(result.states) == 3
     assert len(result.corridor_cons) == 3
+
+
+def test_coarse_path_planner_generates_kinematic_path_in_empty_map():
+    scene = Map2D(12, 8, [], (1, 1), (11, 1))
+    config = PlannerConfig(xy_resolution=0.5, grid_xy_resolution=1.0, step_size=0.2)
+    planner = CoarsePathPlanner(scene, config=config, max_search_time=5.0, max_expansions=20000)
+    path = planner.plan(Pose2D(1.0, 1.0, 0.0), Pose2D(5.0, 1.0, 0.0))
+    assert path
+    arr = poses_to_array(path)
+    assert arr.shape[1] == 3
+    assert np.linalg.norm(arr[-1, :2] - np.array([5.0, 1.0])) < 0.8
+    assert all(not planner.check_pose_collision(Pose2D(*pose)) for pose in arr)
+
+
+def test_coarse_path_planner_respects_homotopy_halfspaces():
+    scene = Map2D(12, 8, [], (1, 1), (11, 7))
+    planner = CoarsePathPlanner(scene, max_search_time=5.0, max_expansions=20000)
+    hyper = [[[1.0, 0.0, 6.0], [-1.0, 0.0, -0.5], [0.0, 1.0, 8.0], [0.0, -1.0, 0.0]]]
+    path = planner.plan(Pose2D(1.0, 1.0, 0.0), Pose2D(5.0, 1.0, 0.0), hyper)
+    assert path
+    assert all(pose.x <= 6.0 + 1e-9 for pose in path)
+
+
+def test_coarse_path_planner_routes_vehicle_discs_around_obstacle():
+    scene = Map2D(14, 8, [RectangleObstacle((6, 1), 1.2, 3.0)], (1, 1), (11, 1))
+    config = PlannerConfig(xy_resolution=0.5, grid_xy_resolution=1.0, step_size=0.2)
+    planner = CoarsePathPlanner(scene, config=config, max_search_time=10.0, max_expansions=60000)
+    path = planner.plan(Pose2D(1.0, 1.0, 0.0), Pose2D(11.0, 1.0, 0.0))
+    assert path
+    assert np.linalg.norm(path[-1].xy() - np.array([11.0, 1.0])) < 0.8
+    assert all(not planner.check_pose_collision(pose) for pose in path)
+
+
+def test_formation_planner_generates_aligned_coarse_full_states():
+    scene = Map2D(14, 8, [], (1, 1), (11, 7))
+    planner = FormationPlanner(scene, robot_count=2)
+    starts = [TrajectoryPoint(1.0, 1.0, 0.0), TrajectoryPoint(1.0, 2.0, 0.0)]
+    goals = [TrajectoryPoint(5.0, 1.0, 0.0), TrajectoryPoint(5.0, 2.0, 0.0)]
+    config = PlannerConfig(xy_resolution=0.5, grid_xy_resolution=1.0, step_size=0.2, min_nfe=6)
+    guesses = planner.plan_coarse_full_states(starts, goals, config=config, max_search_time=5.0)
+    assert len(guesses) == 2
+    assert len(guesses[0].states) == len(guesses[1].states)
+    assert guesses[0].tf == guesses[1].tf
+    np.testing.assert_allclose(guesses[0].states[0].xy(), [1.0, 1.0], atol=0.5)
+    assert np.linalg.norm(guesses[0].states[-1].xy() - np.array([5.0, 1.0])) < 0.8

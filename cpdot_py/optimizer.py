@@ -52,6 +52,16 @@ class VehicleModel:
 class PlannerConfig:
     """Subset of C++ ``PlannerConfig`` used by the formation NLP."""
 
+    xy_resolution: float = 0.5
+    theta_resolution: float = 0.1
+    step_size: float = 0.2
+    next_node_num: int = 6
+    grid_xy_resolution: float = 1.0
+    forward_penalty: float = 0.5
+    backward_penalty: float = 1.0
+    gear_change_penalty: float = 5.0
+    steering_penalty: float = 0.5
+    steering_change_penalty: float = 1.0
     min_nfe: int = 20
     time_step: float = 0.5
     opti_t: float = 1.0
