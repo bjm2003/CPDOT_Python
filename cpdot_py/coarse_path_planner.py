@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib
 import heapq
 import time
 
@@ -110,6 +111,83 @@ def axis_aligned_box(center: np.ndarray, width: float, height: float) -> np.ndar
     )
 
 
+class OptionalDubinsReedsSheppConnector:
+    """Optional real one-shot connector for CPDOT's OMPL path step.
+
+    C++ uses OMPL Dubins/Reeds-Shepp paths. This Python adapter only uses
+    installed compatible bindings and reports unavailable otherwise.
+    """
+
+    def __init__(self) -> None:
+        self.dubins = self._try_import("dubins")
+        self.reeds_shepp = self._try_import("reeds_shepp")
+
+    @staticmethod
+    def _try_import(module_name: str):
+        try:
+            return importlib.import_module(module_name)
+        except ImportError:
+            return None
+
+    def available(self, forward_only: bool) -> bool:
+        return self.dubins is not None if forward_only else self.reeds_shepp is not None
+
+    def generate(
+        self,
+        start: Pose2D,
+        goal: Pose2D,
+        *,
+        turning_radius: float,
+        step_size: float,
+        forward_only: bool,
+    ) -> list[Pose2D]:
+        if forward_only:
+            return self._sample_dubins(start, goal, turning_radius, step_size)
+        return self._sample_reeds_shepp(start, goal, turning_radius, step_size)
+
+    def _sample_dubins(
+        self,
+        start: Pose2D,
+        goal: Pose2D,
+        turning_radius: float,
+        step_size: float,
+    ) -> list[Pose2D]:
+        if self.dubins is None:
+            return []
+        if not hasattr(self.dubins, "shortest_path"):
+            return []
+        path = self.dubins.shortest_path(
+            (start.x, start.y, start.theta),
+            (goal.x, goal.y, goal.theta),
+            turning_radius,
+        )
+        if not hasattr(path, "sample_many"):
+            return []
+        samples, _ = path.sample_many(step_size)
+        return [Pose2D(float(x), float(y), float(theta)) for x, y, theta in samples]
+
+    def _sample_reeds_shepp(
+        self,
+        start: Pose2D,
+        goal: Pose2D,
+        turning_radius: float,
+        step_size: float,
+    ) -> list[Pose2D]:
+        if self.reeds_shepp is None:
+            return []
+        q0 = (start.x, start.y, start.theta)
+        q1 = (goal.x, goal.y, goal.theta)
+        if hasattr(self.reeds_shepp, "path_sample"):
+            samples = self.reeds_shepp.path_sample(q0, q1, turning_radius, step_size)
+            return [Pose2D(float(x), float(y), float(theta)) for x, y, theta in samples]
+        if hasattr(self.reeds_shepp, "shortest_path"):
+            path = self.reeds_shepp.shortest_path(q0, q1, turning_radius)
+            if hasattr(path, "sample_many"):
+                samples, _ = path.sample_many(step_size)
+                return [Pose2D(float(x), float(y), float(theta)) for x, y, theta in samples]
+        return []
+
+
 class CoarsePathPlanner:
     """Port of C++ ``formation_planner::CoarsePathPlanner``.
 
@@ -146,12 +224,14 @@ class CoarsePathPlanner:
         config: PlannerConfig | None = None,
         *,
         enable_oneshot: bool = False,
+        oneshot_connector: OptionalDubinsReedsSheppConnector | None = None,
         max_search_time: float = 30.0,
         max_expansions: int = 200000,
     ):
         self.map = map2d
         self.config = PlannerConfig() if config is None else config
         self.enable_oneshot = enable_oneshot
+        self.oneshot_connector = oneshot_connector or OptionalDubinsReedsSheppConnector()
         self.max_search_time = max_search_time
         self.max_expansions = max_expansions
         self.origin = np.zeros(2, dtype=float)
@@ -385,14 +465,25 @@ class CoarsePathPlanner:
         goal: Node3D,
         hyperparam_set: list[list[list[float]]],
     ) -> list[Pose2D]:
-        """Port C++ ``CheckOneshotPath`` when an OMPL connector is supplied.
-
-        CPDOT uses OMPL's Dubins/Reeds-Shepp implementation here. The current
-        Python environment has no equivalent library installed, so this method
-        returns no connection instead of substituting a different planner.
-        """
-        _ = (node, goal, hyperparam_set)
-        return []
+        """Port C++ ``CheckOneshotPath`` when a compatible connector exists."""
+        if not self.oneshot_connector.available(self.is_forward_only):
+            return []
+        turning_radius = self.config.vehicle.wheel_base / np.tan(self.config.vehicle.phi_max)
+        result = self.oneshot_connector.generate(
+            node.pose,
+            goal.pose,
+            turning_radius=float(turning_radius),
+            step_size=self.config.step_size,
+            forward_only=self.is_forward_only,
+        )
+        if not result:
+            return []
+        for pose in result:
+            if self.check_pose_collision(pose):
+                return []
+        if not self.check_homotopy_constraints(result[-1], hyperparam_set):
+            return []
+        return result
 
     def check_pose_collision(self, pose: Pose2D) -> bool:
         """Port C++ ``Environment::CheckPoseCollision`` using vehicle discs."""

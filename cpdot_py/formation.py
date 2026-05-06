@@ -281,6 +281,7 @@ class FormationPlanner:
         config: PlannerConfig | None = None,
         max_search_time: float = 30.0,
         max_expansions: int = 200000,
+        enable_oneshot: bool = False,
     ) -> list[FullStates]:
         """Port the coarse-guess generation block in C++ ``Plan_fm``."""
         cfg = PlannerConfig() if config is None else config
@@ -297,6 +298,7 @@ class FormationPlanner:
             planner = CoarsePathPlanner(
                 self.map2d,
                 cfg,
+                enable_oneshot=enable_oneshot,
                 max_search_time=max_search_time,
                 max_expansions=max_expansions,
             )

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 
 from cpdot_py import (
@@ -13,6 +15,8 @@ from cpdot_py import (
     generate_desired_rp,
     generate_optimal_time_profile_segment,
     generate_sfc,
+    load_cpp_formation_trajectory,
+    load_cpp_time_steps,
     poses_to_array,
     resample_path_to_full_states,
     rewire_path,
@@ -20,11 +24,15 @@ from cpdot_py import (
     xy_tensor_to_full_states,
 )
 from cpdot_py.forward_kinematics import ForwardKinematics
+from cpdot_py.coarse_path_planner import Node3D, OptionalDubinsReedsSheppConnector
 from cpdot_py.geometry import resample_polyline
 from cpdot_py.metrics import collision_count, formation_similarity, ring_adjacency
 from cpdot_py.optimizer import FormationNLPProblem, PlannerConfig
 from cpdot_py.states import Constraints, FullStates, TrajectoryPoint
 from main import build_scene, next_available_path, source_aligned_robot_states
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_collision_segment_circle():
@@ -276,6 +284,34 @@ def test_coarse_path_planner_routes_vehicle_discs_around_obstacle():
     assert all(not planner.check_pose_collision(pose) for pose in path)
 
 
+def test_optional_oneshot_connector_reports_missing_bindings():
+    connector = OptionalDubinsReedsSheppConnector()
+    connector.dubins = None
+    connector.reeds_shepp = None
+    assert connector.available(True) is False
+    assert connector.available(False) is False
+
+
+def test_coarse_path_planner_uses_supplied_oneshot_connector():
+    class TestConnector:
+        def available(self, forward_only):
+            return True
+
+        def generate(self, start, goal, *, turning_radius, step_size, forward_only):
+            return [Pose2D(start.x, start.y, start.theta), Pose2D(goal.x, goal.y, goal.theta)]
+
+    scene = Map2D(12, 8, [], (1, 1), (11, 1))
+    config = PlannerConfig(min_nfe=4)
+    planner = CoarsePathPlanner(scene, config=config, enable_oneshot=True, oneshot_connector=TestConnector())
+    planner.origin = np.array([3.0, 1.0])
+    planner.is_forward_only = False
+    start = Node3D(Pose2D(1.0, 1.0, 0.0), planner.origin, config)
+    goal = Node3D(Pose2D(5.0, 1.0, 0.0), planner.origin, config)
+    path = planner.check_oneshot_path(start, goal, [])
+    assert len(path) == 2
+    np.testing.assert_allclose(path[-1].xy(), [5.0, 1.0])
+
+
 def test_formation_planner_generates_aligned_coarse_full_states():
     scene = Map2D(14, 8, [], (1, 1), (11, 7))
     planner = FormationPlanner(scene, robot_count=2)
@@ -301,6 +337,24 @@ def test_source_aligned_robot_states_match_cpp_regular_polygon():
         np.testing.assert_allclose(goals[index].xy(), scene.goal + offset)
         assert starts[index].theta == 0.0
         assert goals[index].theta == 0.0
+
+
+def test_cpp_flexible_formation_fixture_matches_python_regular_polygon():
+    fixture_dir = REPO_ROOT / "src/CPDOT/formation_planner/traj_result/flexible_formation/5"
+    trajectory = load_cpp_formation_trajectory(fixture_dir, 5)
+    time_steps = load_cpp_time_steps(fixture_dir / "time_step.yaml")
+    assert trajectory.shape == (9942, 5, 2)
+    assert len(time_steps) == trajectory.shape[0] + 1
+    assert np.isfinite(trajectory).all()
+    assert np.all(np.diff(time_steps) > 0.0)
+
+    first_frame = trajectory[0]
+    center = first_frame.mean(axis=0)
+    expected = center + FormationPlanner(Map2D(80, 80, [], center, center), robot_count=5).desired_offsets
+    np.testing.assert_allclose(first_frame, expected, atol=1e-3)
+    e_max, e_avg = formation_similarity(first_frame[None, :, :], expected - center)
+    assert e_max < 1e-3
+    assert e_avg < 1e-3
 
 
 def test_homotopy_rewire_and_combination_follow_cpp_flow():

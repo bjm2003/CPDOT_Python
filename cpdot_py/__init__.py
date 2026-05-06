@@ -1,6 +1,7 @@
 """Lightweight Python reproduction of the core CPDOT planning ideas."""
 
 from .coarse_path_planner import CoarsePathPlanner, Pose2D, poses_to_array
+from .cpp_fixtures import load_cpp_formation_trajectory, load_cpp_time_steps, load_cpp_xy_trajectory
 from .env import CircleObstacle, Map2D, PolygonObstacle, RectangleObstacle
 from .formation import (
     FormationPlanner,
@@ -46,6 +47,9 @@ __all__ = [
     "generate_desired_rp",
     "generate_optimal_time_profile_segment",
     "generate_sfc",
+    "load_cpp_formation_trajectory",
+    "load_cpp_time_steps",
+    "load_cpp_xy_trajectory",
     "poses_to_array",
     "regular_polygon",
     "resample_path_to_full_states",

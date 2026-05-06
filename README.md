@@ -60,6 +60,9 @@ Aligned with the C++ code:
   discretization, 8-neighbor 2D heuristic, steering primitive expansion,
   gear/steering penalties, vehicle disc collision checks, and
   `CheckHomotopyConstraints`.
+- `CoarsePathPlanner` now has an optional one-shot connector hook matching the
+  C++ `CheckOneshotPath` location. It only uses installed compatible
+  Dubins/Reeds-Shepp bindings and otherwise returns no connection.
 - `FormationPlanner.plan_coarse_full_states` reproduces the C++ coarse-guess
   block before `Plan_fm`: per-robot coarse planning, path resampling, selecting
   the maximum-`tf` trajectory, and aligning all robot trajectories to the same
@@ -78,6 +81,9 @@ Aligned with the C++ code:
   planning under homotopy half-spaces, C++-style path resampling,
   DecompROS-style SFC generation, and the `Plan_fm` warm-start loop. It does
   not call the fast XY smoother.
+- Read-only C++ YAML fixture loaders parse `traj_real*` and `time_step.yaml`
+  files from `src/CPDOT`, allowing source-output comparisons without modifying
+  the reference tree.
 - Formation similarity uses the same ring-adjacency normalized Laplacian shape
   metric used by the C++ reporting code.
 
@@ -97,12 +103,16 @@ Current mismatches found by source review:
 - The C++ coarse planner's OMPL Dubins/Reeds-Shepp one-shot connector is not
   available in the current Python environment. Python does not substitute a
   different connector; it runs the same Hybrid A* expansion and leaves one-shot
-  disabled unless a compatible connector is supplied later.
+  disabled unless a compatible connector is installed and
+  `--source-enable-oneshot` is passed.
 - The C++ `IdentifyHomotopy` source has two apparent indexing/control-flow
   issues in `BeyondInterdisCons`, plus a double-index expression when pushing
   sorted combinations. Python exposes these through
   `--source-strict-homotopy-bugs`, but the default source CLI uses the intended
   adjacent-robot distance and sorted-combination behavior.
+- The checked 5-robot C++ `traj_real5*.yaml` fixture has 9942 trajectory
+  samples, while `time_step.yaml` contains 9943 entries. Python fixture tests
+  preserve this source-data shape instead of silently trimming it.
 - The standalone demo still defaults to the fast XY smoother for portability.
   Use `--mode source` for the current source-aligned reproduced core pipeline.
 - The command-line staged interface, YAML scene loading, metrics JSON output,
@@ -111,11 +121,9 @@ Current mismatches found by source review:
 
 Near-term implementation plan:
 
-1. Add or vendor a Python-compatible OMPL Dubins/Reeds-Shepp connector for the
-   C++ one-shot path, without replacing it with a different shortcut algorithm.
-2. Add fixture-based comparisons against selected C++ YAML trajectories and
+1. Extend fixture comparisons from trajectory structure to selected generated
    corridor half-spaces.
-3. Decide whether to keep documenting the two C++ source-level issues above or
+2. Decide whether to keep documenting the C++ source-level issues above or
    preserve them behind strict compatibility flags only.
 
 ## Environment

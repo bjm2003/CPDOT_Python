@@ -287,6 +287,7 @@ def run_source_aligned_demo(args: argparse.Namespace) -> dict[str, float | str]:
         config=config,
         max_search_time=args.source_coarse_time,
         max_expansions=args.source_max_expansions,
+        enable_oneshot=args.source_enable_oneshot,
     )
     result = formation.plan_fm_from_guess(
         guess,
@@ -391,6 +392,7 @@ def main() -> None:
     parser.add_argument("--source-min-nfe", type=int, default=20)
     parser.add_argument("--source-coarse-time", type=float, default=30.0)
     parser.add_argument("--source-max-expansions", type=int, default=200000)
+    parser.add_argument("--source-enable-oneshot", action="store_true")
     parser.add_argument("--source-warm-starts", type=int, default=15)
     parser.add_argument("--source-initial-warm-starts", type=int, default=5)
     parser.add_argument("--source-solver-maxiter", type=int, default=200)
