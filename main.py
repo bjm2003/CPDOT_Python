@@ -16,7 +16,10 @@ from cpdot_py import (
     RectangleObstacle,
     TopologyPRM,
     TrajectoryPoint,
+    cal_combination,
+    cal_corridors,
     full_states_to_xy_tensor,
+    rewire_path,
 )
 from cpdot_py.states import CPDOT_FORMATION_ROBOTS
 from cpdot_py.geometry import resample_polyline
@@ -205,6 +208,62 @@ def source_aligned_robot_states(
     return starts, goals
 
 
+def source_aligned_homotopy_constraints(
+    scene: Map2D,
+    start_set: list[TrajectoryPoint],
+    goal_set: list[TrajectoryPoint],
+    args: argparse.Namespace,
+) -> tuple[list[list[list[list[float]]]], list[np.ndarray], list[int]]:
+    """Port the C++ center-topology, rewire, combination, and corridor block."""
+    distance = float(np.linalg.norm(scene.goal - scene.start))
+    ratio = 1.0
+    topo_paths: list[np.ndarray] = []
+    for _ in range(args.source_topology_attempts):
+        prm = TopologyPRM(
+            scene,
+            max_samples=args.samples,
+            sample_inflate=(max(11.0, 0.85 * distance), 0.28 * scene.height),
+            clearance=0.2,
+            resolution=0.35,
+            max_raw_paths=16,
+            reserve_num=args.source_topology_paths,
+            seed=args.seed,
+        )
+        topo_paths = prm.find_topo_paths(scene.start, scene.goal, rectangle_ratio=ratio)
+        if topo_paths:
+            break
+        ratio *= 1.5
+    if not topo_paths:
+        raise RuntimeError("source topology PRM did not find center paths")
+
+    raw_paths_set: list[list[np.ndarray]] = []
+    for start, goal in zip(start_set, goal_set):
+        robot_paths = []
+        start_xy = np.asarray([start.x, start.y], dtype=float)
+        goal_xy = np.asarray([goal.x, goal.y], dtype=float)
+        for path in topo_paths:
+            robot_paths.append(rewire_path(resample_polyline(path, 100), start_xy, goal_xy, scene))
+        raw_paths_set.append(robot_paths)
+
+    combination_result = cal_combination(
+        raw_paths_set,
+        scene,
+        selected_path_limit=args.source_topology_paths,
+        preserve_cpp_bugs=args.source_strict_homotopy_bugs,
+    )
+    if not combination_result.combinations:
+        raise RuntimeError("source homotopy combination filtering removed all candidates")
+    combination = combination_result.combinations[0]
+    hyperparam_sets = cal_corridors(
+        combination_result.paths_sets,
+        combination,
+        scene,
+        bbox_width=args.source_topology_bbox,
+        preserve_cpp_cumulative_polys=args.source_strict_homotopy_bugs,
+    )
+    return hyperparam_sets, topo_paths, combination
+
+
 def run_source_aligned_demo(args: argparse.Namespace) -> dict[str, float | str]:
     """Run the reproduced CPDOT core chain: coarse path -> SFC -> Plan_fm."""
     scene_seed = args.scene_seed
@@ -220,9 +279,11 @@ def run_source_aligned_demo(args: argparse.Namespace) -> dict[str, float | str]:
         min_nfe=args.source_min_nfe,
     )
     start_set, goal_set = source_aligned_robot_states(scene, formation)
+    hyperparam_sets, topo_paths, combination = source_aligned_homotopy_constraints(scene, start_set, goal_set, args)
     guess = formation.plan_coarse_full_states(
         start_set,
         goal_set,
+        hyperparam_sets=hyperparam_sets,
         config=config,
         max_search_time=args.source_coarse_time,
         max_expansions=args.source_max_expansions,
@@ -247,7 +308,7 @@ def run_source_aligned_demo(args: argparse.Namespace) -> dict[str, float | str]:
     center_guide = np.asarray([scene.start, scene.goal], dtype=float)
     plot_result(
         scene,
-        [center_guide],
+        topo_paths,
         trajectory,
         figure_path,
         selected_guide=center_guide,
@@ -272,6 +333,8 @@ def run_source_aligned_demo(args: argparse.Namespace) -> dict[str, float | str]:
         "source_reason": result.reason,
         "source_warm_start": float(result.warm_start),
         "source_solve_count": float(len(result.solve_history)),
+        "source_topology_path_count": float(len(topo_paths)),
+        "source_topology_first_combination_sum": float(sum(combination)),
         "source_coarse_tf": float(guess[0].tf),
         "source_result_tf": float(result.states[0].tf),
         "source_radius_max": float(np.max(finite_radii)) if len(finite_radii) else float("nan"),
@@ -331,6 +394,10 @@ def main() -> None:
     parser.add_argument("--source-warm-starts", type=int, default=15)
     parser.add_argument("--source-initial-warm-starts", type=int, default=5)
     parser.add_argument("--source-solver-maxiter", type=int, default=200)
+    parser.add_argument("--source-topology-attempts", type=int, default=4)
+    parser.add_argument("--source-topology-paths", type=int, default=5)
+    parser.add_argument("--source-topology-bbox", type=float, default=3.0)
+    parser.add_argument("--source-strict-homotopy-bugs", action="store_true")
     parser.add_argument("--source-strict-cpp-early-return", action="store_true")
     args = parser.parse_args()
 

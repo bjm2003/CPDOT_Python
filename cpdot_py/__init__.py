@@ -13,6 +13,7 @@ from .formation import (
     xy_tensor_to_full_states,
 )
 from .forward_kinematics import ForwardKinematics
+from .homotopy import CombinationResult, Pathset, cal_combination, cal_corridors, rewire_path
 from .optimizer import FormationNLPProblem, FormationNLPSolution, PlannerConfig, VehicleModel, solve_fm
 from .sfc import generate_sfc
 from .states import CPDOT_FORMATION_ROBOTS, Constraints, FullStates, TrajectoryPoint
@@ -22,6 +23,7 @@ __all__ = [
     "CircleObstacle",
     "CPDOT_FORMATION_ROBOTS",
     "CoarsePathPlanner",
+    "CombinationResult",
     "Constraints",
     "FormationPlanner",
     "FormationNLPProblem",
@@ -29,6 +31,7 @@ __all__ = [
     "ForwardKinematics",
     "FullStates",
     "Map2D",
+    "Pathset",
     "PlanFmResult",
     "PolygonObstacle",
     "PlannerConfig",
@@ -37,6 +40,8 @@ __all__ = [
     "TopologyPRM",
     "TrajectoryPoint",
     "VehicleModel",
+    "cal_combination",
+    "cal_corridors",
     "full_states_to_xy_tensor",
     "generate_desired_rp",
     "generate_optimal_time_profile_segment",
@@ -44,6 +49,7 @@ __all__ = [
     "poses_to_array",
     "regular_polygon",
     "resample_path_to_full_states",
+    "rewire_path",
     "solve_fm",
     "xy_tensor_to_full_states",
 ]

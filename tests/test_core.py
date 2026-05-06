@@ -8,11 +8,14 @@ from cpdot_py import (
     Pose2D,
     RectangleObstacle,
     TopologyPRM,
+    cal_combination,
+    cal_corridors,
     generate_desired_rp,
     generate_optimal_time_profile_segment,
     generate_sfc,
     poses_to_array,
     resample_path_to_full_states,
+    rewire_path,
     solve_fm,
     xy_tensor_to_full_states,
 )
@@ -298,3 +301,46 @@ def test_source_aligned_robot_states_match_cpp_regular_polygon():
         np.testing.assert_allclose(goals[index].xy(), scene.goal + offset)
         assert starts[index].theta == 0.0
         assert goals[index].theta == 0.0
+
+
+def test_homotopy_rewire_and_combination_follow_cpp_flow():
+    scene = Map2D(20, 12, [], (2, 6), (18, 6))
+    planner = FormationPlanner(scene, robot_count=5)
+    starts, goals = source_aligned_robot_states(scene, planner)
+    center_paths = [
+        np.array([[2.0, 6.0], [18.0, 6.0]]),
+        np.array([[2.0, 6.0], [10.0, 8.0], [18.0, 6.0]]),
+    ]
+    raw_paths_set = []
+    for start, goal in zip(starts, goals):
+        robot_paths = [
+            rewire_path(resample_polyline(path, 100), start.xy(), goal.xy(), scene)
+            for path in center_paths
+        ]
+        raw_paths_set.append(robot_paths)
+
+    result = cal_combination(raw_paths_set, scene, selected_path_limit=2)
+    assert result.combinations
+    assert all(len(combination) == 5 for combination in result.combinations)
+    assert [0, 0, 0, 0, 0] in result.combinations
+    assert len(result.paths_sets) == 5
+    for robot in range(5):
+        np.testing.assert_allclose(result.paths_sets[robot][0].path[0], starts[robot].xy())
+        np.testing.assert_allclose(result.paths_sets[robot][0].path[-1], goals[robot].xy())
+
+
+def test_cal_corridors_builds_halfspaces_for_selected_combination():
+    scene = Map2D(20, 12, [], (2, 6), (18, 6))
+    planner = FormationPlanner(scene, robot_count=5)
+    starts, goals = source_aligned_robot_states(scene, planner)
+    raw_paths_set = []
+    center_path = np.array([[2.0, 6.0], [18.0, 6.0]])
+    for start, goal in zip(starts, goals):
+        raw_paths_set.append([rewire_path(resample_polyline(center_path, 100), start.xy(), goal.xy(), scene)])
+
+    result = cal_combination(raw_paths_set, scene, selected_path_limit=1)
+    corridors = cal_corridors(result.paths_sets, result.combinations[0], scene, bbox_width=3.0)
+    assert len(corridors) == 5
+    assert all(len(robot_corridors) == 100 for robot_corridors in corridors)
+    for point in result.paths_sets[0][0].path[::20]:
+        assert any(all(a * point[0] + b * point[1] - c <= 1e-7 for a, b, c in corridor) for corridor in corridors[0])

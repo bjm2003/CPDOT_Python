@@ -73,9 +73,11 @@ Aligned with the C++ code:
   extraction, `GenerateDesiredRP` radius updates, repeated `SolveFm` calls, and
   infeasibility/radius checks.
 - `main.py --mode source` now runs the reproduced source-aligned chain:
-  C++ regular-polygon robot start/goal generation, per-robot Hybrid A* coarse
-  planning, C++-style path resampling, DecompROS-style SFC generation, and the
-  `Plan_fm` warm-start loop. It does not call the fast XY smoother.
+  C++ regular-polygon robot start/goal generation, centerline TopologyPRM,
+  `RewiretPath`, `CalCombination`, `CalCorridors`, per-robot Hybrid A* coarse
+  planning under homotopy half-spaces, C++-style path resampling,
+  DecompROS-style SFC generation, and the `Plan_fm` warm-start loop. It does
+  not call the fast XY smoother.
 - Formation similarity uses the same ring-adjacency normalized Laplacian shape
   metric used by the C++ reporting code.
 
@@ -96,6 +98,11 @@ Current mismatches found by source review:
   available in the current Python environment. Python does not substitute a
   different connector; it runs the same Hybrid A* expansion and leaves one-shot
   disabled unless a compatible connector is supplied later.
+- The C++ `IdentifyHomotopy` source has two apparent indexing/control-flow
+  issues in `BeyondInterdisCons`, plus a double-index expression when pushing
+  sorted combinations. Python exposes these through
+  `--source-strict-homotopy-bugs`, but the default source CLI uses the intended
+  adjacent-robot distance and sorted-combination behavior.
 - The standalone demo still defaults to the fast XY smoother for portability.
   Use `--mode source` for the current source-aligned reproduced core pipeline.
 - The command-line staged interface, YAML scene loading, metrics JSON output,
@@ -168,13 +175,16 @@ Optional:
 conda run -n cpdot-py python main.py --show
 conda run -n cpdot-py python main.py --animate
 conda run -n cpdot-py python main.py --scene-seed 42
-conda run -n cpdot-py python main.py --mode source --scene-seed 0 --robots 3 \
-  --source-step-size 0.35 --source-warm-starts 1 \
+conda run -n cpdot-py python main.py --mode source --scene-seed 0 \
+  --source-topology-paths 3 --source-coarse-time 15 \
+  --source-max-expansions 150000 --source-warm-starts 1 \
   --source-initial-warm-starts 1 --source-solver-maxiter 0
 ```
 
 The default fast demo keeps the CPDOT structure but still uses a lightweight
 Python smoother for runtime. The source-aligned CLI path uses
-`cpdot_py.CoarsePathPlanner`, `cpdot_py.generate_sfc`, `cpdot_py.solve_fm`,
+`cpdot_py.TopologyPRM`, `cpdot_py.cal_combination`,
+`cpdot_py.cal_corridors`, `cpdot_py.CoarsePathPlanner`,
+`cpdot_py.generate_sfc`, `cpdot_py.solve_fm`,
 `cpdot_py.FormationNLPProblem`, and
 `cpdot_py.FormationPlanner.plan_fm_from_guess`.
