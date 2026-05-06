@@ -37,13 +37,62 @@ def plot_map(map2d: Map2D, ax=None):
     return ax
 
 
-def plot_result(map2d: Map2D, topo_paths: list[np.ndarray], trajectory: np.ndarray, output: str | Path):
+def plot_result(
+    map2d: Map2D,
+    topo_paths: list[np.ndarray],
+    trajectory: np.ndarray,
+    output: str | Path,
+    *,
+    selected_guide: np.ndarray | None = None,
+    seed_trajectory: np.ndarray | None = None,
+    robot_topo_paths: list[list[np.ndarray]] | None = None,
+):
     """Save a static planning result figure."""
     fig, ax = plt.subplots(figsize=(11, 7))
     plot_map(map2d, ax)
     for i, path in enumerate(topo_paths):
-        ax.plot(path[:, 0], path[:, 1], "--", lw=1.2, alpha=0.5, label="topo paths" if i == 0 else None)
+        ax.plot(
+            path[:, 0],
+            path[:, 1],
+            "--",
+            color="#94a3b8",
+            lw=0.9,
+            alpha=0.45,
+            label="center topo candidates" if i == 0 else None,
+        )
+    if selected_guide is not None:
+        ax.plot(
+            selected_guide[:, 0],
+            selected_guide[:, 1],
+            color="#111827",
+            lw=2.0,
+            alpha=0.8,
+            label="selected center guide",
+        )
     colors = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"]
+    if seed_trajectory is not None:
+        for r in range(seed_trajectory.shape[1]):
+            ax.plot(
+                seed_trajectory[:, r, 0],
+                seed_trajectory[:, r, 1],
+                color=colors[r % len(colors)],
+                lw=1.0,
+                ls=":",
+                alpha=0.55,
+                label="robot coarse seeds" if r == 0 else None,
+            )
+    if robot_topo_paths is not None:
+        for r, paths in enumerate(robot_topo_paths):
+            for j, path in enumerate(paths):
+                ax.plot(
+                    path[:, 0],
+                    path[:, 1],
+                    color=colors[r % len(colors)],
+                    lw=0.85,
+                    ls="--",
+                    alpha=0.35,
+                    label="robot topo candidates" if r == 0 and j == 0 else None,
+                )
     for r in range(trajectory.shape[1]):
         ax.plot(
             trajectory[:, r, 0],
