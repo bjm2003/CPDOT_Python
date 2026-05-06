@@ -67,7 +67,9 @@ class VVCMConstants:
     """Constants from C++ ``VVCM`` used by the formation NLP bounds."""
 
     formation_radius: float = 4.05 / np.sqrt(3.0)
+    radius_inc: float = 0.2
     xv2t: float = 1.2
+    zr: float = 2.2
 
     @property
     def xv2(self) -> float:

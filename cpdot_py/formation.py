@@ -10,8 +10,9 @@ import numpy as np
 from .env import CircleObstacle, Map2D, PolygonObstacle, RectangleObstacle
 from .forward_kinematics import ForwardKinematics
 from .geometry import headings_from_path, resample_polyline
-from .optimizer import PlannerConfig
-from .states import CPDOT_FORMATION_ROBOTS, FullStates, TrajectoryPoint
+from .optimizer import FormationNLPSolution, PlannerConfig, VVCMConstants, solve_fm
+from .sfc import generate_sfc
+from .states import CPDOT_FORMATION_ROBOTS, Constraints, FullStates, TrajectoryPoint
 from .topo_prm import TopologyPRM
 
 
@@ -166,6 +167,63 @@ def resample_path_to_full_states(
     return FullStates(tf=total_time, states=states)
 
 
+def full_states_to_xy_tensor(states: list[FullStates]) -> np.ndarray:
+    """Convert C++ joint ``FullStates`` to ``T x R x 2``."""
+    if not states:
+        raise ValueError("states must not be empty")
+    nfe = len(states[0].states)
+    if any(len(item.states) != nfe for item in states):
+        raise ValueError("all robot trajectories must have the same length")
+    out = np.zeros((nfe, len(states), 2), dtype=float)
+    for robot, full in enumerate(states):
+        out[:, robot, :] = full.xy_array()
+    return out
+
+
+def xy_tensor_to_full_states(
+    trajectory: np.ndarray,
+    *,
+    config: PlannerConfig | None = None,
+) -> list[FullStates]:
+    """Convert ``T x R x 2`` paths to C++ ``FullStates`` guesses."""
+    arr = np.asarray(trajectory, dtype=float)
+    if arr.ndim != 3 or arr.shape[2] != 2:
+        raise ValueError("trajectory must have shape T x R x 2")
+    return [
+        resample_path_to_full_states(arr[:, robot, :], step_num=arr.shape[0], ratio=True, config=config)
+        for robot in range(arr.shape[1])
+    ]
+
+
+def generate_desired_rp(height_cons: np.ndarray, height_cons_set: np.ndarray) -> np.ndarray:
+    """Port C++ ``GenerateDesiredRP`` height-to-radius update."""
+    vvcm = VVCMConstants()
+    out = np.asarray(height_cons_set, dtype=float).copy()
+    for i, height in enumerate(np.asarray(height_cons, dtype=float)):
+        if height == -1:
+            out[i] = -1.0
+        elif out[i] == -1:
+            out[i] = vvcm.xv2t
+        else:
+            out[i] += vvcm.radius_inc
+    return out
+
+
+@dataclass
+class PlanFmResult:
+    """Python result container for the C++ ``Plan_fm`` core loop."""
+
+    states: list[FullStates]
+    best_states: list[FullStates] | None
+    corridor_cons: list[list[list[list[float]]]]
+    height_cons: np.ndarray
+    height_cons_set: np.ndarray
+    solve_history: list[FormationNLPSolution]
+    warm_start: int
+    success: bool
+    reason: str
+
+
 @dataclass
 class FormationPlanner:
     """Plan and optimize a flexible multi-robot formation along a guide path."""
@@ -198,6 +256,173 @@ class FormationPlanner:
             rot = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
             traj[t] = center + self.desired_offsets @ rot.T
         return traj
+
+    def generate_corridor_constraints(
+        self,
+        guess: list[FullStates],
+        *,
+        bbox_width: float = 5.0,
+    ) -> list[list[list[list[float]]]]:
+        """Port the per-robot ``env_->generateSFC`` call from C++ ``Plan_fm``."""
+        corridors: list[list[list[list[float]]]] = []
+        for full in guess:
+            path = full.xy_array()
+            hpolys, _, _ = generate_sfc(path, self.map2d, bbox_width=bbox_width)
+            corridors.append(hpolys)
+        return corridors
+
+    def generate_height_cons(self, guess: list[FullStates]) -> np.ndarray:
+        """Port C++ ``FormationPlanner::GenerateHeightCons``."""
+        trajectory = full_states_to_xy_tensor(guess)
+        return self.obstacle_height_constraints(trajectory)
+
+    def derive_heights_from_full_states(self, states: list[FullStates]) -> np.ndarray:
+        """Port C++ ``DeriveHeight`` for joint ``FullStates``."""
+        return self.derive_heights(full_states_to_xy_tensor(states))
+
+    def check_height_cons(self, states: list[FullStates], height_cons: np.ndarray) -> tuple[bool, np.ndarray]:
+        """Port C++ ``CheckHeightCons``."""
+        heights = self.derive_heights_from_full_states(states)
+        for i, constraint in enumerate(np.asarray(height_cons, dtype=float)):
+            if constraint != -1 and (not np.isfinite(heights[i]) or constraint >= heights[i]):
+                return False, heights
+        return True, heights
+
+    def plan_fm_from_guess(
+        self,
+        guess: list[FullStates],
+        *,
+        profile: list[Constraints] | None = None,
+        config: PlannerConfig | None = None,
+        bbox_width: float = 5.0,
+        max_warm_start: int = 15,
+        initial_warm_starts: int = 5,
+        solver_maxiter: int = 200,
+        enforce_cpp_early_return: bool = False,
+    ) -> PlanFmResult:
+        """Reproduce the core C++ ``Plan_fm`` loop from existing guesses.
+
+        Coarse path generation remains outside this function, just as the C++
+        method delegates it to ``coarse_path_planner_`` before building safe
+        corridors and solving ``SolveFm``.
+        """
+        if not guess:
+            raise ValueError("guess must not be empty")
+        cfg = PlannerConfig() if config is None else config
+        if profile is None:
+            profile = [Constraints(start=full.states[0], goal=full.states[-1]) for full in guess]
+        corridor_cons = self.generate_corridor_constraints(guess, bbox_width=bbox_width)
+        height_cons = self.generate_height_cons(guess)
+        vvcm = VVCMConstants()
+        height_cons_set = np.full(len(guess[0].states), vvcm.xv2t, dtype=float)
+        result = guess
+        current_guess = guess
+        best: list[FullStates] | None = None
+        history: list[FormationNLPSolution] = []
+        warm_start = 0
+
+        while warm_start < max_warm_start:
+            if warm_start < initial_warm_starts:
+                solution = solve_fm(
+                    profile,
+                    current_guess,
+                    config=cfg,
+                    corridor_cons=corridor_cons,
+                    height_cons=height_cons_set.tolist(),
+                    w_inf=cfg.opti_w_penalty0,
+                    maxiter=solver_maxiter,
+                )
+                history.append(solution)
+                result = solution.states
+                if solution.infeasibility > 1.0:
+                    return PlanFmResult(
+                        result,
+                        best,
+                        corridor_cons,
+                        height_cons,
+                        height_cons_set,
+                        history,
+                        warm_start,
+                        False,
+                        "infeasibility_above_cpp_initial_threshold",
+                    )
+                current_guess = result
+                height_cons = self.generate_height_cons(result)
+                if best is None or best[0].tf > result[0].tf:
+                    best = result
+                warm_start += 1
+                continue
+
+            if enforce_cpp_early_return and warm_start == initial_warm_starts:
+                return PlanFmResult(
+                    best or result,
+                    best,
+                    corridor_cons,
+                    height_cons,
+                    height_cons_set,
+                    history,
+                    warm_start,
+                    False,
+                    "cpp_source_returns_false_at_warm_start_5",
+                )
+
+            height_ok, _ = self.check_height_cons(result, height_cons)
+            if not height_ok:
+                height_cons = self.generate_height_cons(current_guess)
+                height_cons_set = generate_desired_rp(height_cons, height_cons_set)
+            elif best is None or best[0].tf > result[0].tf:
+                best = result
+
+            solution = solve_fm(
+                profile,
+                current_guess,
+                config=cfg,
+                corridor_cons=corridor_cons,
+                height_cons=height_cons_set.tolist(),
+                w_inf=cfg.opti_w_penalty0,
+                maxiter=solver_maxiter,
+            )
+            history.append(solution)
+            result = solution.states
+            current_guess = result
+            finite_radius = height_cons_set[height_cons_set != -1]
+            if len(finite_radius) and np.max(finite_radius) > vvcm.formation_radius:
+                return PlanFmResult(
+                    result,
+                    best,
+                    corridor_cons,
+                    height_cons,
+                    height_cons_set,
+                    history,
+                    warm_start,
+                    False,
+                    "height_radius_exceeds_formation_radius",
+                )
+            if solution.infeasibility > 0.5:
+                return PlanFmResult(
+                    result,
+                    best,
+                    corridor_cons,
+                    height_cons,
+                    height_cons_set,
+                    history,
+                    warm_start,
+                    False,
+                    "infeasibility_above_cpp_refinement_threshold",
+                )
+            warm_start += 1
+
+        return PlanFmResult(
+            best or result,
+            best,
+            corridor_cons,
+            height_cons,
+            height_cons_set,
+            history,
+            warm_start,
+            best is not None,
+            "completed_warm_start_loop",
+        )
 
     def plan_individual_trajectories(
         self,

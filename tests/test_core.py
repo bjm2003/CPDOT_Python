@@ -6,9 +6,12 @@ from cpdot_py import (
     Map2D,
     RectangleObstacle,
     TopologyPRM,
+    generate_desired_rp,
     generate_optimal_time_profile_segment,
+    generate_sfc,
     resample_path_to_full_states,
     solve_fm,
+    xy_tensor_to_full_states,
 )
 from cpdot_py.forward_kinematics import ForwardKinematics
 from cpdot_py.geometry import resample_polyline
@@ -196,3 +199,41 @@ def test_solve_fm_wrapper_returns_joint_states_for_static_guess():
     assert solution.solve_time >= 0.0
     assert solution.infeasibility < 1e-5
     np.testing.assert_allclose(solution.states[0].states[0].xy(), points[0])
+
+
+def test_generate_sfc_contains_path_samples():
+    scene = Map2D(12, 8, [RectangleObstacle((6, 4), 1.5, 4.0)], (1, 1), (11, 7))
+    path = np.array([[2.0, 1.0], [4.0, 1.2], [9.0, 6.5]])
+    hpolys, key_points, vertices = generate_sfc(path, scene, bbox_width=3.0)
+    assert len(hpolys) == len(path)
+    assert len(key_points) == len(path)
+    assert len(vertices) == len(path)
+    for point, halfspaces in zip(path, hpolys):
+        residuals = [a * point[0] + b * point[1] - c for a, b, c in halfspaces]
+        assert max(residuals) <= 1e-7
+
+
+def test_height_radius_update_matches_cpp_generate_desired_rp():
+    current = np.array([1.2, 1.2, -1.0])
+    heights = np.array([-1.0, 0.8, 0.5])
+    updated = generate_desired_rp(heights, current)
+    np.testing.assert_allclose(updated, [-1.0, 1.4, 1.2])
+
+
+def test_plan_fm_from_guess_runs_cpp_core_loop_smoke():
+    scene = Map2D(10, 10, [], (1, 1), (9, 9))
+    points = np.array(
+        [
+            [3.0, 2.0],
+            [2.0, 3.7320508],
+            [1.0, 2.0],
+        ]
+    )
+    trajectory = np.repeat(points[None, :, :], 3, axis=0)
+    guess = xy_tensor_to_full_states(trajectory)
+    planner = FormationPlanner(scene, robot_count=3)
+    result = planner.plan_fm_from_guess(guess, max_warm_start=1, initial_warm_starts=1, solver_maxiter=0)
+    assert result.solve_history
+    assert result.warm_start == 1
+    assert len(result.states) == 3
+    assert len(result.corridor_cons) == 3

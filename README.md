@@ -20,12 +20,17 @@ Implemented pieces:
   `formation_planner/forward_kinematics.cpp`.
 - C++-style path resampling/time profiling and a SciPy-backed `SolveFm`
   counterpart for the joint formation penalty NLP.
-- Static visualization and optional animation.
+- DecompROS-style safe flight corridor generation from
+  `Environment::generateSFC`.
+- `Plan_fm` core warm-start loop around joint `SolveFm`, operating on Python
+  `FullStates` guesses.
+- Static visualization and optional animation for the fast demo path.
 
 ## Fidelity status
 
-The current code should be treated as a runnable simplified reproduction, not a
-paper-equivalent implementation.
+The current code has two tracks: source-aligned algorithm primitives and a fast
+standalone demo. The source-aligned pieces are the ones to use when comparing
+against CPDOT core algorithms.
 
 Aligned with the C++ code:
 
@@ -48,6 +53,14 @@ Aligned with the C++ code:
 - `resample_path_to_full_states` ports C++ `FormationPlanner::ResamplePath`,
   including time profile, velocity, steering, acceleration, and steering-rate
   fields.
+- `generate_sfc` ports the DecompROS 2D ellipsoid corridor path used by
+  `Environment::generateSFC`: obstacle edge interpolation, local bounding boxes,
+  ellipsoid shrinkage around obstacle points, closest separating hyperplanes,
+  and `[a_x, a_y, b]` half-space output.
+- `FormationPlanner.plan_fm_from_guess` reproduces the core `Plan_fm` sequence
+  after coarse path generation: per-robot SFC construction, height-constraint
+  extraction, `GenerateDesiredRP` radius updates, repeated `SolveFm` calls, and
+  infeasibility/radius checks.
 - Formation similarity uses the same ring-adjacency normalized Laplacian shape
   metric used by the C++ reporting code.
 
@@ -56,30 +69,33 @@ Current mismatches found by source review:
 - The Python `solve_fm` uses SciPy finite-difference optimization, not
   IPOPT/ADOL-C sparse derivatives. The objective, bounds, packing, and residuals
   match the C++ structure, but convergence behavior is not identical.
-- The C++ planner generates safe corridors around each robot path and couples
-  all robots in one formation optimization. Python can evaluate corridor
-  half-spaces in `FormationNLPProblem`, but it does not yet port
-  `Environment::generateSFC`/IRIS corridor construction.
-- The C++ `Plan_fm` loop iteratively tightens height-derived inter-robot
-  distance constraints with `GenerateHeightCons` and `GenerateDesiredRP`.
-  Python has height evaluation and obstacle height constraints, but the full
-  warm-start loop is not yet wired into the demo.
+- The C++ `Plan_fm` function currently has a source-level early
+  `return false` at `warm_start == 5`, making its later height-tightening branch
+  unreachable as written. Python exposes this through
+  `enforce_cpp_early_return=True`, but defaults to running the intended
+  refinement branch.
+- The C++ `SolveFm` safe-corridor residual appears to use `cos(theta)` in the
+  first disc's y-coordinate expression; Python keeps the algorithmically
+  consistent `GetDiscPositions` formula used elsewhere in the C++ source.
+- Coarse path generation is not yet a direct port of `CoarsePathPlanner`; the
+  source-aligned `plan_fm_from_guess` starts after coarse guesses already exist.
 - The standalone demo still defaults to the fast XY smoother for portability;
-  the new `solve_fm` path is available as a source-code reproduction primitive
-  and is covered by tests.
+  the source-aligned `plan_fm_from_guess` path is available separately and is
+  covered by tests.
 - The command-line staged interface, YAML scene loading, metrics JSON output,
   and unicycle/diff-drive simulation from the implementation guide are not yet
   complete.
 
 Near-term implementation plan:
 
-1. Port safe-flight-corridor generation from `Environment::generateSFC` or add a
-   Python half-space corridor builder with the same data shape.
-2. Wire `resample_path_to_full_states` into robot seed generation so `SolveFm`
-   receives full `(x, y, theta, v, phi, a, omega)` guesses.
-3. Implement the C++ `Plan_fm` warm-start loop around `solve_fm`, including
-   `GenerateDesiredRP` height tightening.
-4. Add a CLI flag to run the full joint NLP path separately from the fast demo.
+1. Port or replace the remaining coarse path planner gap so Python can produce
+   the same pre-`Plan_fm` full-state guesses as CPDOT.
+2. Add a CLI flag to run the source-aligned `plan_fm_from_guess` path separately
+   from the fast demo.
+3. Add fixture-based comparisons against selected C++ YAML trajectories and
+   corridor half-spaces.
+4. Decide whether to keep documenting the two C++ source-level issues above or
+   preserve them behind strict compatibility flags only.
 
 ## Environment
 
@@ -142,4 +158,6 @@ conda run -n cpdot-py python main.py --scene-seed 42
 
 The default demo keeps the CPDOT structure but still uses a lightweight Python
 smoother for runtime. The source-level NLP reproduction is available through
-`cpdot_py.solve_fm` and the `FormationNLPProblem` class.
+`cpdot_py.generate_sfc`, `cpdot_py.solve_fm`,
+`cpdot_py.FormationNLPProblem`, and
+`cpdot_py.FormationPlanner.plan_fm_from_guess`.
