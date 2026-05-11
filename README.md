@@ -99,7 +99,7 @@ xdg-open outputs/cpdot_animation.gif
 xdg-open outputs/cpdot_source_animation.gif
 ```
 
-可视化结果（.png/.gif/.npm）保存在 `outputs/`，若无则会在首次运行时自动生成。
+可视化结果（.png/.gif/.npz）保存在 `outputs/`，若无则会在首次运行时自动生成。
 
 ## CLI Modes
 

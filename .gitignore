@@ -1,7 +1,11 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-outputs/
+
+# Generated outputs are ignored by default, but keep small visual assets used by README.
+outputs/*
+!outputs/*.gif
+!outputs/*.png
 
 # Native/ROS build products. The Python tests do not depend on these.
 build/
