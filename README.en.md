@@ -6,8 +6,7 @@ CPDOT Python Reproduction is a Python reproduction of the core planning
 pipeline from the paper **Multi-Nonholonomic Robot Object Transportation with
 Obstacle Crossing using a Deformable Sheet**. The project includes algorithm
 implementations, tests, visualization scripts, and fixture data extracted from
-C++ outputs. It does not include the original C++/ROS source tree or catkin
-build artifacts.
+C++ outputs.
 
 The default configuration uses a 3-vehicle formation and supports
 `N in [3, 7]`. For experiments that follow the paper pipeline, use
