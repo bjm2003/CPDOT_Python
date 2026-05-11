@@ -1,5 +1,7 @@
 # CPDOT Python Reproduction
 
+[中文](README.md) | [English](README.en.md)
+
 CPDOT Python Reproduction 是对论文 **Multi-Nonholonomic Robot Object
 Transportation with Obstacle Crossing using a Deformable Sheet** 中核心规划
 流程的 Python 复现。项目包含算法实现、测试、可视化脚本和从 C++ 输出提取的
@@ -117,6 +119,7 @@ xdg-open outputs/cpdot_source_animation.gif
 ```
 .
 ├── README.md
+├── README.en.md
 ├── environment.yml / requirements.txt
 ├── main.py                        # CLI 入口
 ├── cpdot_py/                      # 算法包
