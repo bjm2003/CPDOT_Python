@@ -10,6 +10,7 @@ import numpy as np
 from .geometry import (
     AABB,
     as_point,
+    oriented_box,
     point_in_polygon,
     polygon_edges,
     polygons_intersect,
@@ -165,6 +166,21 @@ class Map2D:
         if any(not self.is_in_bounds(v, clearance) for v in polygon):
             return True
         return any(polygons_intersect(polygon, obs.polygon()) for obs in self.obstacles)
+
+    def vertex_box_collides(self, centre: Iterable[float], vehicle_offset: float = 3.0) -> bool:
+        """Port C++ ``Environment::CheckVerticeCollision`` box check."""
+        box = oriented_box(as_point(centre), 0.0, 2.0 + 1.2, vehicle_offset + 1.2)
+        return self.polygon_collides(box)
+
+    def spatial_envelope_collides(self, centre: Iterable[float], vehicle_offset: float = 3.0) -> bool:
+        """Port C++ ``Environment::CheckSpatialEnvelopes`` box check."""
+        box = oriented_box(
+            as_point(centre),
+            0.0,
+            np.sqrt(2.0) * (2.0 + 1.2),
+            np.sqrt(2.0) * (vehicle_offset + 1.2),
+        )
+        return self.polygon_collides(box)
 
     def obstacle_height_under_polygon(self, polygon: np.ndarray) -> float | None:
         """Return max obstacle height intersected by a formation polygon."""

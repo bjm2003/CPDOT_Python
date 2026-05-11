@@ -137,3 +137,70 @@ class AABB:
             self.xmin + clearance <= point[0] <= self.xmax - clearance
             and self.ymin + clearance <= point[1] <= self.ymax - clearance
         )
+
+    @property
+    def width(self) -> float:
+        return float(self.xmax - self.xmin)
+
+    @property
+    def height(self) -> float:
+        return float(self.ymax - self.ymin)
+
+    @property
+    def center(self) -> np.ndarray:
+        return np.asarray([(self.xmin + self.xmax) / 2.0, (self.ymin + self.ymax) / 2.0], dtype=float)
+
+    def corners(self) -> np.ndarray:
+        """Port C++ ``AABox2d::GetAllCorners`` order."""
+        return np.asarray(
+            [
+                [self.xmin, self.ymin],
+                [self.xmax, self.ymin],
+                [self.xmax, self.ymax],
+                [self.xmin, self.ymax],
+            ],
+            dtype=float,
+        )
+
+    def overlaps(self, other: "AABB") -> bool:
+        """Port C++ ``AABox2d::HasOverlap``."""
+        return not (
+            other.xmin > self.xmax + EPS
+            or other.xmax < self.xmin - EPS
+            or other.ymin > self.ymax + EPS
+            or other.ymax < self.ymin - EPS
+        )
+
+    def distance_to_point(self, point: Iterable[float]) -> float:
+        """Port C++ ``AABox2d::DistanceTo(Vec2d)``."""
+        point = as_point(point)
+        dx = max(self.xmin - point[0], 0.0, point[0] - self.xmax)
+        dy = max(self.ymin - point[1], 0.0, point[1] - self.ymax)
+        return float(np.hypot(dx, dy))
+
+    def distance_to_aabb(self, other: "AABB") -> float:
+        """Port C++ ``AABox2d::DistanceTo(AABox2d)``."""
+        if self.overlaps(other):
+            return 0.0
+        dx = max(other.xmin - self.xmax, self.xmin - other.xmax, 0.0)
+        dy = max(other.ymin - self.ymax, self.ymin - other.ymax, 0.0)
+        return float(np.hypot(dx, dy))
+
+
+def oriented_box(center: Iterable[float], theta: float, length: float, width: float) -> np.ndarray:
+    """Return C++ ``Box2d``-style oriented rectangle vertices."""
+    center = as_point(center)
+    half_l = length / 2.0
+    half_w = width / 2.0
+    local = np.asarray(
+        [
+            [half_l, half_w],
+            [half_l, -half_w],
+            [-half_l, -half_w],
+            [-half_l, half_w],
+        ],
+        dtype=float,
+    )
+    c, s = np.cos(theta), np.sin(theta)
+    rot = np.asarray([[c, -s], [s, c]], dtype=float)
+    return center + local @ rot.T

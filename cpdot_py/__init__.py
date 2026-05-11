@@ -1,11 +1,21 @@
 """Lightweight Python reproduction of the core CPDOT planning ideas."""
 
 from .coarse_path_planner import CoarsePathPlanner, Pose2D, poses_to_array
-from .cpp_fixtures import load_cpp_formation_trajectory, load_cpp_time_steps, load_cpp_xy_trajectory
+from .cpp_fixtures import (
+    cpp_warmstart_endpoints,
+    cpp_warmstart_xy_tensor,
+    load_cpp_formation_trajectory,
+    load_cpp_nlp_solution,
+    load_cpp_time_steps,
+    load_cpp_warmstart_set,
+    load_cpp_xy_trajectory,
+)
 from .env import CircleObstacle, Map2D, PolygonObstacle, RectangleObstacle
 from .formation import (
     FormationPlanner,
     PlanFmResult,
+    PlanResult,
+    ReplanResult,
     full_states_to_xy_tensor,
     generate_desired_rp,
     generate_optimal_time_profile_segment,
@@ -14,8 +24,34 @@ from .formation import (
     xy_tensor_to_full_states,
 )
 from .forward_kinematics import ForwardKinematics
-from .homotopy import CombinationResult, Pathset, cal_combination, cal_corridors, rewire_path
-from .optimizer import FormationNLPProblem, FormationNLPSolution, PlannerConfig, VehicleModel, solve_fm
+from .homotopy import (
+    CombinationResult,
+    Pathset,
+    cal_combination,
+    cal_corridors,
+    cal_homotopy_set,
+    cal_length_set,
+    cal_safety_set,
+    cal_turning_set,
+    eval_path_length,
+    find_smallest_indices,
+    find_two_smallest,
+    rewire_path,
+)
+from .optimizer import (
+    CarLikeNLPProblem,
+    CarLikeReplanNLPProblem,
+    DiffDriveNLPProblem,
+    FormationNLPProblem,
+    FormationNLPSolution,
+    SingleRobotNLPSolution,
+    PlannerConfig,
+    VehicleModel,
+    solve,
+    solve_diff_drive,
+    solve_fm,
+    solve_replan,
+)
 from .sfc import generate_sfc
 from .states import CPDOT_FORMATION_ROBOTS, Constraints, FullStates, TrajectoryPoint
 from .topo_prm import TopologyPRM
@@ -34,26 +70,46 @@ __all__ = [
     "Map2D",
     "Pathset",
     "PlanFmResult",
+    "PlanResult",
     "PolygonObstacle",
     "PlannerConfig",
     "Pose2D",
+    "ReplanResult",
     "RectangleObstacle",
+    "SingleRobotNLPSolution",
     "TopologyPRM",
     "TrajectoryPoint",
     "VehicleModel",
+    "CarLikeNLPProblem",
+    "CarLikeReplanNLPProblem",
     "cal_combination",
     "cal_corridors",
+    "cal_homotopy_set",
+    "cal_length_set",
+    "cal_safety_set",
+    "cal_turning_set",
+    "cpp_warmstart_endpoints",
+    "cpp_warmstart_xy_tensor",
+    "DiffDriveNLPProblem",
+    "eval_path_length",
+    "find_smallest_indices",
+    "find_two_smallest",
     "full_states_to_xy_tensor",
     "generate_desired_rp",
     "generate_optimal_time_profile_segment",
     "generate_sfc",
     "load_cpp_formation_trajectory",
+    "load_cpp_nlp_solution",
     "load_cpp_time_steps",
+    "load_cpp_warmstart_set",
     "load_cpp_xy_trajectory",
     "poses_to_array",
     "regular_polygon",
     "resample_path_to_full_states",
     "rewire_path",
+    "solve",
+    "solve_diff_drive",
     "solve_fm",
+    "solve_replan",
     "xy_tensor_to_full_states",
 ]

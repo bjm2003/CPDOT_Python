@@ -1,3 +1,11 @@
 __pycache__/
 *.py[cod]
+.pytest_cache/
 outputs/
+
+# Native/ROS build products. The Python tests do not depend on these.
+build/
+devel/
+install/
+log/
+*.egg-info/

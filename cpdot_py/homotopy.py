@@ -11,6 +11,9 @@ from .env import Map2D
 from .geometry import polygons_intersect, resample_polyline
 from .sfc import generate_sfc
 
+DEFAULT_INTER_ROBOT_DISTANCE_LIMIT = 4.05
+INTER_ROBOT_DISTANCE_TOLERANCE = 1e-9
+
 
 @dataclass
 class Pathset:
@@ -43,6 +46,28 @@ def path_length(path: np.ndarray) -> float:
 def discretize_path(path: np.ndarray, point_count: int = 100) -> np.ndarray:
     """Port ``discretizePath``."""
     return resample_polyline(np.asarray(path, dtype=float), point_count)
+
+
+def find_two_smallest(values: list[float]) -> list[int]:
+    """Port C++ ``findTwoSmallest``.
+
+    Despite the source name, the active implementation returns all indices
+    sorted by value, not only two indices.
+    """
+    return sorted(range(len(values)), key=lambda idx: values[idx])
+
+
+def find_smallest_indices(values: list[float], count: int) -> list[int]:
+    """Port C++ ``findSmallestIndices``."""
+    if count <= 0:
+        return []
+    return sorted(range(len(values)), key=lambda idx: values[idx])[: min(count, len(values))]
+
+
+def eval_path_length(raw_paths: list[np.ndarray], num_selected_path: int) -> list[int]:
+    """Port C++ ``evalPathLength`` path-length ranking."""
+    lengths = [path_length(path) for path in raw_paths]
+    return find_smallest_indices(lengths, num_selected_path)
 
 
 def generate_combinations(robot_count: int, max_index: int) -> list[list[int]]:
@@ -114,13 +139,15 @@ def beyond_inter_distance_cons(
     combination: list[int],
     *,
     preserve_cpp_bug: bool = False,
+    distance_limit: float = DEFAULT_INTER_ROBOT_DISTANCE_LIMIT,
 ) -> bool:
     """Port ``BeyondInterdisCons``.
 
     The C++ source indexes the next robot with ``combination[j]`` and returns
     ``true`` after the loop, which removes nearly all combinations. The default
-    keeps the intended adjacent-robot distance check; strict compatibility can
-    reproduce the source-level behavior.
+    keeps the intended adjacent-robot distance check using the VVCM edge limit
+    ``xv2`` (4.05m); strict compatibility can reproduce the source-level
+    behavior.
     """
     for i in range(len(paths_sets[0][0].path)):
         for j in range(len(combination)):
@@ -128,7 +155,8 @@ def beyond_inter_distance_cons(
             next_choice = combination[j] if preserve_cpp_bug else combination[(j + 1) % len(combination)]
             following = paths_sets[(j + 1) % len(combination)][next_choice].path[i]
             inter_dis = abs(current[1] - following[1]) if preserve_cpp_bug else float(np.linalg.norm(current - following))
-            if inter_dis > 3.0:
+            limit = 3.0 if preserve_cpp_bug else distance_limit
+            if inter_dis > limit + INTER_ROBOT_DISTANCE_TOLERANCE:
                 return True
     return True if preserve_cpp_bug else False
 
@@ -136,6 +164,37 @@ def beyond_inter_distance_cons(
 def cal_length_set(paths_sets: list[list[Pathset]], combination: list[int]) -> float:
     """Port ``CalLengthSet``."""
     return float(sum(paths_sets[i][combination[i]].path_length for i in range(len(combination))) / len(paths_sets))
+
+
+def cal_turning_set(paths_sets: list[list[Pathset]], combination: list[int]) -> float:
+    """Port C++ ``CalTurningSet`` source behavior.
+
+    The C++ helper truncates direction deltas to ``int`` and returns the
+    integer quotient ``turnCount / combination.size()``. The function is present
+    in the source but its cost term is commented out in ``CalCombination``.
+    """
+    if not combination:
+        return 0.0
+    turn_count = 0
+    sample_count = len(paths_sets[0][0].path)
+    for i in range(1, sample_count - 1):
+        for robot, selected in enumerate(combination):
+            path = paths_sets[robot][selected].path
+            dir1_x = int(path[i, 0] - path[i - 1, 0])
+            dir1_y = int(path[i, 1] - path[i - 1, 1])
+            len1 = float(np.sqrt(dir1_x * dir1_x + dir1_y * dir1_y))
+            norm_dir1_x = np.nan if len1 == 0.0 else dir1_x / len1
+            norm_dir1_y = np.nan if len1 == 0.0 else dir1_y / len1
+
+            dir2_x = int(path[i + 1, 0] - path[i, 0])
+            dir2_y = int(path[i + 1, 1] - path[i, 1])
+            len2 = float(np.sqrt(dir2_x * dir2_x + dir2_y * dir2_y))
+            norm_dir2_x = np.nan if len2 == 0.0 else dir2_x / len2
+            norm_dir2_y = np.nan if len2 == 0.0 else dir2_y / len2
+
+            if norm_dir1_x != norm_dir2_x or norm_dir1_y != norm_dir2_y:
+                turn_count += 1
+    return float(turn_count // len(combination))
 
 
 def cal_homotopy_set(combination: list[int]) -> float:
@@ -191,7 +250,7 @@ def cal_combination(
     num_selected_path = min(selected_path_limit, min_path_num)
     paths_sets: list[list[Pathset]] = []
     for raw_paths in raw_paths_set:
-        order = sorted(range(len(raw_paths)), key=lambda idx: path_length(raw_paths[idx]))[:num_selected_path]
+        order = eval_path_length(raw_paths, num_selected_path)
         paths_sets.append([Pathset(path_length(raw_paths[idx]), discretize_path(raw_paths[idx], 100)) for idx in order])
 
     combinations = generate_combinations(len(raw_paths_set), num_selected_path - 1)

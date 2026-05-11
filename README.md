@@ -1,198 +1,172 @@
 # CPDOT Python Reproduction
 
-This is a standalone Python reproduction of selected core algorithmic ideas in
-the CPDOT C++/ROS codebase. It is intentionally not a full ROS/Gazebo rewrite,
-and it is still not an exact reproduction of every ROS, IRIS, IPOPT, and
-visualization component in the paper code.
+CPDOT Python Reproduction 是对论文 **Multi-Nonholonomic Robot Object
+Transportation with Obstacle Crossing using a Deformable Sheet** 中核心规划
+流程的 Python 复现。项目包含算法实现、测试、可视化脚本和从 C++ 输出提取的
+fixture 数据，不包含原 C++/ROS 工程源码和 catkin 编译产物。
 
-Implemented pieces:
+默认配置为 3 车编队，支持 `N in [3, 7]`。论文流程相关实验建议使用
+`--mode source --source-solver-method ipopt`。
 
-- 2D obstacle map with point, segment, and polygon collision checks.
-- Topological PRM using the CPDOT guard/connector roadmap idea from
-  `formation_planner/topo_prm.cpp`.
-- Homotopy-style path pruning by checking visibility between corresponding
-  samples of two paths.
-- Multi-robot formation rollout along selected guide paths, with per-robot PRM
-  seed paths used as a practical fallback for the standalone demo.
-- Simplified trajectory smoothing with obstacle, segment-safety, smoothness, and
-  formation-shape penalties.
-- Flexible sheet forward kinematics ported from
-  `formation_planner/forward_kinematics.cpp`.
-- C++-style path resampling/time profiling and a SciPy-backed `SolveFm`
-  counterpart for the joint formation penalty NLP.
-- Hybrid A* coarse path planning from `CoarsePathPlanner`, including 3D grid
-  nodes, 2D DP heuristic, kinematic vehicle expansion, disc-box collision
-  checking, costs, and homotopy half-space filtering.
-- DecompROS-style safe flight corridor generation from
-  `Environment::generateSFC`.
-- `Plan_fm` core warm-start loop around joint `SolveFm`, operating on Python
-  `FullStates` guesses.
-- Static visualization and optional animation for the fast demo path.
+## Visual Results
 
-## Fidelity status
+当前 `outputs/` 下的 source 动画结果。
 
-The current code has two tracks: source-aligned algorithm primitives and a fast
-standalone demo. The source-aligned pieces are the ones to use when comparing
-against CPDOT core algorithms.
+### 3 vehicles
 
-Aligned with the C++ code:
+<p>
+  <img src="outputs/cpdot_source_animation.gif" alt="CPDOT source animation with 3 vehicles" width="480">
+  <img src="outputs/cpdot_source_animation_002.gif" alt="CPDOT source animation with 3 vehicles passing obstacles from different sides" width="480">
+</p>
 
-- The topological PRM keeps the guard/connector graph structure, visibility
-  tests, shortcutting, and homotopy-style pruning from
-  `formation_planner/topo_prm.cpp`.
-- The flexible sheet forward kinematics follows the C++ taut-subset
-  enumeration, rank checks, KKT solve, feasibility checks, and force-closure
-  test from `formation_planner/forward_kinematics.cpp`.
-- The standalone demo now defaults to five robots, matching the flexible
-  formation demo paths and `num_robot_ = 5` setting used by the C++ source.
-- `TrajectoryPoint` and `FullStates` mirror the C++ optimizer state containers
-  and provide the base for porting `SolveFm`.
-- `FormationNLPProblem` now mirrors the C++ formation IPOPT variable layout,
-  initial vector packing, objective, infeasibility residuals, and variable
-  bounds.
-- `solve_fm` solves the same bound-constrained penalty objective used by C++
-  `LightweightProblem::SolveFm`, then unpacks results using the C++
-  `ConvertVectorToJointStates` layout.
-- `resample_path_to_full_states` ports C++ `FormationPlanner::ResamplePath`,
-  including time profile, velocity, steering, acceleration, and steering-rate
-  fields.
-- `CoarsePathPlanner` ports the C++ Hybrid A* body: `Node3d`/`Node2d`
-  discretization, 8-neighbor 2D heuristic, steering primitive expansion,
-  gear/steering penalties, vehicle disc collision checks, and
-  `CheckHomotopyConstraints`.
-- `CoarsePathPlanner` now has an optional one-shot connector hook matching the
-  C++ `CheckOneshotPath` location. It only uses installed compatible
-  Dubins/Reeds-Shepp bindings and otherwise returns no connection.
-- `FormationPlanner.plan_coarse_full_states` reproduces the C++ coarse-guess
-  block before `Plan_fm`: per-robot coarse planning, path resampling, selecting
-  the maximum-`tf` trajectory, and aligning all robot trajectories to the same
-  `tf`/`nfe`.
-- `generate_sfc` ports the DecompROS 2D ellipsoid corridor path used by
-  `Environment::generateSFC`: obstacle edge interpolation, local bounding boxes,
-  ellipsoid shrinkage around obstacle points, closest separating hyperplanes,
-  and `[a_x, a_y, b]` half-space output.
-- `FormationPlanner.plan_fm_from_guess` reproduces the core `Plan_fm` sequence
-  after coarse path generation: per-robot SFC construction, height-constraint
-  extraction, `GenerateDesiredRP` radius updates, repeated `SolveFm` calls, and
-  infeasibility/radius checks.
-- `main.py --mode source` now runs the reproduced source-aligned chain:
-  C++ regular-polygon robot start/goal generation, centerline TopologyPRM,
-  `RewiretPath`, `CalCombination`, `CalCorridors`, per-robot Hybrid A* coarse
-  planning under homotopy half-spaces, C++-style path resampling,
-  DecompROS-style SFC generation, and the `Plan_fm` warm-start loop. It does
-  not call the fast XY smoother.
-- Read-only C++ YAML fixture loaders parse `traj_real*` and `time_step.yaml`
-  files from `src/CPDOT`, allowing source-output comparisons without modifying
-  the reference tree.
-- Formation similarity uses the same ring-adjacency normalized Laplacian shape
-  metric used by the C++ reporting code.
+### 5 vehicles
 
-Current mismatches found by source review:
+<p>
+  <img src="outputs/cpdot_source_animation_001.gif" alt="CPDOT source animation with 5 vehicles" width="480">
+</p>
 
-- The Python `solve_fm` uses SciPy finite-difference optimization, not
-  IPOPT/ADOL-C sparse derivatives. The objective, bounds, packing, and residuals
-  match the C++ structure, but convergence behavior is not identical.
-- The C++ `Plan_fm` function currently has a source-level early
-  `return false` at `warm_start == 5`, making its later height-tightening branch
-  unreachable as written. Python exposes this through
-  `enforce_cpp_early_return=True`, but defaults to running the intended
-  refinement branch.
-- The C++ `SolveFm` safe-corridor residual appears to use `cos(theta)` in the
-  first disc's y-coordinate expression; Python keeps the algorithmically
-  consistent `GetDiscPositions` formula used elsewhere in the C++ source.
-- The C++ coarse planner's OMPL Dubins/Reeds-Shepp one-shot connector is not
-  available in the current Python environment. Python does not substitute a
-  different connector; it runs the same Hybrid A* expansion and leaves one-shot
-  disabled unless a compatible connector is installed and
-  `--source-enable-oneshot` is passed.
-- The C++ `IdentifyHomotopy` source has two apparent indexing/control-flow
-  issues in `BeyondInterdisCons`, plus a double-index expression when pushing
-  sorted combinations. Python exposes these through
-  `--source-strict-homotopy-bugs`, but the default source CLI uses the intended
-  adjacent-robot distance and sorted-combination behavior.
-- The checked 5-robot C++ `traj_real5*.yaml` fixture has 9942 trajectory
-  samples, while `time_step.yaml` contains 9943 entries. Python fixture tests
-  preserve this source-data shape instead of silently trimming it.
-- The standalone demo still defaults to the fast XY smoother for portability.
-  Use `--mode source` for the current source-aligned reproduced core pipeline.
-- The command-line staged interface, YAML scene loading, metrics JSON output,
-  and unicycle/diff-drive simulation from the implementation guide are not yet
-  complete.
+## Installation
 
-Near-term implementation plan:
-
-1. Extend fixture comparisons from trajectory structure to selected generated
-   corridor half-spaces.
-2. Decide whether to keep documenting the C++ source-level issues above or
-   preserve them behind strict compatibility flags only.
-
-## Environment
-
-Create and activate the isolated Conda environment:
+需要 Python 3.10。推荐使用 conda：
 
 ```bash
-cd /home/lyq/CPDOT/cpdot_python
+cd CPDOT
+
 conda env create -f environment.yml
 conda activate cpdot-py
 ```
 
-If the environment already exists:
+已有环境可更新：
 
 ```bash
 conda env update -f environment.yml --prune
 conda activate cpdot-py
 ```
 
-The pinned package versions are also mirrored in `requirements.txt` for pip-only
-setups, but Conda is the recommended path here.
-
-## Acceptance
-
-Run the tests first:
+也可以使用 pip：
 
 ```bash
-conda run -n cpdot-py python -m pytest tests
+python -m pip install -r requirements.txt
 ```
 
-Then run the demo:
+CasADi 的 pip 包自带 IPOPT 二进制后端，通常不需要单独编译 IPOPT。
+
+## Full Test Commands
+
+以下命令覆盖测试收集、全量测试、快速 demo、source stage pipeline、完整 source
+流程、动画生成和动画播放。
 
 ```bash
-conda run -n cpdot-py python main.py
+cd CPDOT
+conda activate cpdot-py
+
+# 1. 确认测试可收集
+python -m pytest --collect-only tests -q
+
+# 2. 全量测试
+python -m pytest tests -q
+
+# 3. 清空旧输出，确保后续文件名固定
+rm -rf outputs
+
+# 4. 快速 smoke demo，生成静态图
+python main.py --mode fast --scene-seed 0
+
+# 5. 快速 smoke demo，生成动画 GIF
+python main.py --mode fast --scene-seed 0 --animate
+
+# 6. source stage 逐段运行并保存中间结果
+python main.py --mode source --scene-seed 0 --source-stage topo
+python main.py --mode source --scene-seed 0 --source-stage combo
+python main.py --mode source --scene-seed 0 --source-stage corridor
+python main.py --mode source --scene-seed 0 --source-stage coarse
+python main.py --mode source --scene-seed 0 --source-stage plan \
+  --source-warm-starts 1 --source-initial-warm-starts 1 \
+  --source-solver-method ipopt
+
+# 7. 可视化 plan stage 结果
+python scripts/visualize_stage.py \
+  --npz outputs/source_stage_plan.npz \
+  --output outputs/source_stage_plan.png
+
+# 8. 论文流程完整链路，生成静态图和动画 GIF
+python main.py --mode source --scene-seed 0 \
+  --source-warm-starts 1 --source-initial-warm-starts 1 \
+  --source-solver-method ipopt --animate
+
+# 9. 播放动画
+xdg-open outputs/cpdot_animation.gif
+xdg-open outputs/cpdot_source_animation.gif
 ```
 
-The demo should print metrics including a nonzero `topo_path_count` and
-`robot_collision_count: 0.0000`. By default, each run uses a new randomized
-obstacle seed and prints `scene_seed`; pass `--scene-seed N` to reproduce a
-specific scene exactly. It never overwrites previous figures: the first run
-writes
+可视化结果（.png/.gif/.npm）保存在 `outputs/`，若无则会在首次运行时自动生成。
 
-```text
-outputs/cpdot_result.png
+## CLI Modes
+
+| Mode | Command | Description |
+|---|---|---|
+| `fast` | `python main.py --mode fast` | 快速 smoke demo，使用轻量启发式平滑器，不作为论文复现实验数据 |
+| `source` | `python main.py --mode source --source-solver-method ipopt` | 运行论文核心流程：TopologyPRM、同伦组合、走廊、粗规划、Plan_fm |
+| `source-single` | `python main.py --mode source-single` | 单机器人 Plan、diff-drive、car-like replan 分支诊断 |
+
+`outputs/` 中的输出文件不会覆盖已有结果；若目标文件存在，会自动追加
+`_001`、`_002` 等后缀。需要固定文件名时，先执行 `rm -rf outputs`。
+
+## 目录结构
+
+```
+.
+├── README.md
+├── environment.yml / requirements.txt
+├── main.py                        # CLI 入口
+├── cpdot_py/                      # 算法包
+│   ├── topo_prm.py                  # Topological PRM(guard/connector)
+│   ├── homotopy.py                  # 同伦类组合 + 评分 + 走廊
+│   ├── coarse_path_planner.py       # Hybrid A* + 2D DP heuristic
+│   ├── sfc.py                       # DecompROS ellipsoid 安全飞行走廊
+│   ├── forward_kinematics.py        # 柔性 sheet taut-subset + KKT
+│   ├── optimizer.py                 # 4 个 NLP(scipy 后端)
+│   ├── optimizer_casadi.py          # 4 个 NLP(CasADi/IPOPT 后端)
+│   ├── formation.py                 # FormationPlanner / Plan_fm 主循环
+│   ├── env.py / geometry.py         # 障碍 / 几何
+│   ├── states.py                    # TrajectoryPoint / FullStates / Constraints
+│   ├── metrics.py                   # ring-Laplacian formation_similarity
+│   ├── cpp_fixtures.py              # 加载 cpp_fixtures/ 下的 YAML
+│   └── visualization.py             # 静态图 / 动画
+├── tests/                         # pytest 测试
+├── scripts/                       # 批量实验、stage 可视化、Gazebo 比对脚本
+├── cpp_fixtures/                  # 论文原版 C++ NLP 输出(N=3 + N=5)
+│   └── flexible_formation/
+│       ├── 3/                       # traj_3R1000.yaml + traj_real3R.yaml + ...
+│       └── 5/
+└── outputs/                       # demo 输出目录，运行时自动生成
 ```
 
-and later runs write paths such as:
+## 算法 ↔ 代码对照
 
-```text
-outputs/cpdot_result_001.png
-outputs/cpdot_result_002.png
-```
+| 算法步骤 | Python 模块 |
+|---|---|
+| 中心拓扑 PRM | `cpdot_py.TopologyPRM` |
+| 同伦类组合枚举 + safety / length / homotopy 评分 | `cpdot_py.cal_combination` |
+| 每机器人 bbox 半空间走廊 | `cpdot_py.cal_corridors` |
+| Hybrid A* 粗规划 | `cpdot_py.CoarsePathPlanner` |
+| DecompROS 安全飞行走廊 | `cpdot_py.generate_sfc` |
+| 柔性 sheet 正运动学(taut-subset + KKT) | `cpdot_py.ForwardKinematics` |
+| 4 NLP(car-like / diff-drive / replan / formation) | `cpdot_py.{CarLike,DiffDrive,CarLikeReplan,Formation}NLPProblem` |
+| Plan_fm warm-start 主循环 | `cpdot_py.FormationPlanner.plan_fm_from_guess` |
 
-Optional:
+## Notes
 
-```bash
-conda run -n cpdot-py python main.py --show
-conda run -n cpdot-py python main.py --animate
-conda run -n cpdot-py python main.py --scene-seed 42
-conda run -n cpdot-py python main.py --mode source --scene-seed 0 \
-  --source-topology-paths 3 --source-coarse-time 15 \
-  --source-max-expansions 150000 --source-warm-starts 1 \
-  --source-initial-warm-starts 1 --source-solver-maxiter 0
-```
-
-The default fast demo keeps the CPDOT structure but still uses a lightweight
-Python smoother for runtime. The source-aligned CLI path uses
-`cpdot_py.TopologyPRM`, `cpdot_py.cal_combination`,
-`cpdot_py.cal_corridors`, `cpdot_py.CoarsePathPlanner`,
-`cpdot_py.generate_sfc`, `cpdot_py.solve_fm`,
-`cpdot_py.FormationNLPProblem`, and
-`cpdot_py.FormationPlanner.plan_fm_from_guess`.
+- **求解器后端**:scipy(L-BFGS-B + 有限差分,默认)或 CasADi+IPOPT
+  (`--source-solver-method ipopt`)。scipy 仅适合 smoke / `--mode fast`,
+  论文数据用 IPOPT。
+- **C++ 原码 bug 复现开关**:论文 C++ 源码里有三个已知 bug
+  (`IdentifyHomotopy.cpp` 的 `BeyondInterdisCons` 双索引和无条件 `return true`、
+  `combinations[sorted_indices[sorted_indices[i]]]` 双重索引、`Plan_fm` 在
+  `warm_start == 5` 的早返回)。Python 默认走作者本意修正版;
+  `--source-strict-homotopy-bugs` 和 `--source-strict-cpp-early-return` 复现源码 bug。
+- **fixture 数据**:`cpp_fixtures/` 来自原 C++ 仓库
+  `formation_planner/traj_result/flexible_formation/{3,5}/` 输出，用作 Python
+  端对照基准。
+- **回归基准**:Python 端 IPOPT 在 N=3 fixture 场景下与 C++ NLP 输出的 `tf`
+  偏差由 `tests/test_cpp_baseline_diff.py` 约束在 0.2% 以内。

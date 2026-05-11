@@ -4,14 +4,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import heapq
+import time
 
 import numpy as np
 
 from .coarse_path_planner import CoarsePathPlanner, Pose2D, poses_to_array
+from .coarse_path_planner import axis_aligned_box
 from .env import CircleObstacle, Map2D, PolygonObstacle, RectangleObstacle
 from .forward_kinematics import ForwardKinematics
 from .geometry import headings_from_path, resample_polyline
-from .optimizer import FormationNLPSolution, PlannerConfig, VVCMConstants, solve_fm
+from .optimizer import (
+    FormationNLPSolution,
+    PlannerConfig,
+    SingleRobotNLPSolution,
+    VVCMConstants,
+    solve as solve_single_robot,
+    solve_diff_drive,
+    solve_fm,
+    solve_replan,
+)
 from .sfc import generate_sfc
 from .states import CPDOT_FORMATION_ROBOTS, Constraints, FullStates, TrajectoryPoint
 from .topo_prm import TopologyPRM
@@ -226,6 +237,34 @@ class PlanFmResult:
 
 
 @dataclass
+class PlanResult:
+    """Result container for C++ ``FormationPlanner::Plan`` counterpart."""
+
+    state: FullStates
+    guess: FullStates
+    solution: SingleRobotNLPSolution | None
+    coarse_time: float
+    solve_time: float
+    infeasibility: float
+    success: bool
+    reason: str
+
+
+@dataclass
+class ReplanResult:
+    """Result container for C++ heterogeneous replan wrappers."""
+
+    state: FullStates
+    solution: SingleRobotNLPSolution
+    infeasibility: float
+    solve_time: float
+    max_error: float
+    avg_error: float
+    success: bool
+    reason: str
+
+
+@dataclass
 class FormationPlanner:
     """Plan and optimize a flexible multi-robot formation along a guide path."""
 
@@ -257,6 +296,400 @@ class FormationPlanner:
             rot = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
             traj[t] = center + self.desired_offsets @ rot.T
         return traj
+
+    def generate_guess_from_path(
+        self,
+        path: list[Pose2D] | np.ndarray,
+        start: TrajectoryPoint,
+        step_num: int = 0,
+        ratio: bool = False,
+        config: PlannerConfig | None = None,
+    ) -> FullStates:
+        """Port C++ ``FormationPlanner::GenerateGuessFromPath``.
+
+        The source prunes a global pose path at the waypoint closest to the
+        current start state, then calls ``ResamplePath`` on the remaining path.
+        """
+        arr = poses_to_array(path) if isinstance(path, list) else np.asarray(path, dtype=float)
+        if arr.ndim != 2 or arr.shape[1] not in (2, 3) or len(arr) == 0:
+            raise ValueError("path must be a non-empty Nx2 or Nx3 path")
+        distances = np.linalg.norm(arr[:, :2] - start.xy(), axis=1)
+        closest_index = int(np.argmin(distances))
+        pruned = arr[closest_index:]
+        if len(pruned) == 1:
+            point = pruned[0]
+            theta = float(point[2]) if pruned.shape[1] == 3 else start.theta
+            pruned = np.vstack([point[:2], point[:2]])
+            pruned = np.column_stack([pruned, [theta, theta]])
+        return resample_path_to_full_states(pruned, step_num=step_num, ratio=ratio, config=config)
+
+    @staticmethod
+    def stitch_previous_solution(solution: FullStates, start: TrajectoryPoint) -> FullStates:
+        """Port C++ ``FormationPlanner::StitchPreviousSolution``."""
+        if not solution.states:
+            return FullStates()
+        distances = [float(np.hypot(state.x - start.x, state.y - start.y)) for state in solution.states]
+        closest_index = int(np.argmin(distances))
+        dt = solution.tf / len(solution.states)
+        return FullStates(
+            tf=float(solution.tf - closest_index * dt),
+            states=list(solution.states[closest_index:]),
+        )
+
+    def check_guess_feasibility(
+        self,
+        guess: FullStates,
+        config: PlannerConfig | None = None,
+    ) -> bool:
+        """Port C++ ``FormationPlanner::CheckGuessFeasibility``.
+
+        The C++ implementation delegates each state to
+        ``Environment::CheckPoseCollision``. Here we mirror the existing
+        Python Hybrid A* collision model: the vehicle is approximated by its
+        configured discs, each checked as an axis-aligned box.
+        """
+        if not guess.states:
+            return False
+        cfg = PlannerConfig() if config is None else config
+        wh = cfg.vehicle.disc_radius * 2.0
+        for state in guess.states:
+            discs = cfg.vehicle.disc_positions(state.x, state.y, state.theta)
+            for i in range(cfg.vehicle.n_disc):
+                center = np.array([discs[2 * i], discs[2 * i + 1]], dtype=float)
+                if self.map2d.polygon_collides(axis_aligned_box(center, wh, wh)):
+                    return False
+        return True
+
+    def _generate_corridor_box(
+        self,
+        center: np.ndarray,
+        radius: float,
+        config: PlannerConfig,
+    ) -> tuple[float, float, float, float] | None:
+        """Port the AABox expansion behavior used by C++ ``GenerateCorridorBox``."""
+        center = np.asarray(center, dtype=float)
+        ri = float(radius)
+
+        def collides(cx: float, cy: float, xmin_extra: float = 0.0, xmax_extra: float = 0.0,
+                     ymin_extra: float = 0.0, ymax_extra: float = 0.0) -> bool:
+            box_center = np.array(
+                [
+                    cx + 0.5 * (xmax_extra - xmin_extra),
+                    cy + 0.5 * (ymax_extra - ymin_extra),
+                ],
+                dtype=float,
+            )
+            width = 2.0 * ri + xmin_extra + xmax_extra
+            height = 2.0 * ri + ymin_extra + ymax_extra
+            return self.map2d.polygon_collides(axis_aligned_box(box_center, width, height))
+
+        x, y = float(center[0]), float(center[1])
+        if collides(x, y):
+            found = False
+            inc = 4
+            while inc < config.corridor_max_iter:
+                iteration = inc // 4
+                edge = inc % 4
+                real_x, real_y = x, y
+                if edge == 0:
+                    real_x = x - iteration * 0.05
+                elif edge == 1:
+                    real_x = x + iteration * 0.05
+                elif edge == 2:
+                    real_y = y - iteration * 0.05
+                else:
+                    real_y = y + iteration * 0.05
+                inc += 1
+                if not collides(real_x, real_y):
+                    x, y = real_x, real_y
+                    found = True
+                    break
+            if not found:
+                return None
+
+        incremental = [0.0, 0.0, 0.0, 0.0]
+        blocked = [False, False, False, False]
+        step = ri * 0.2
+        inc = 4
+        while not all(blocked) and inc < config.corridor_max_iter:
+            iteration = inc // 4
+            edge = inc % 4
+            inc += 1
+            if blocked[edge]:
+                continue
+            incremental[edge] = iteration * step
+            if (
+                collides(x, y, incremental[0], incremental[1], incremental[2], incremental[3])
+                or incremental[edge] >= config.corridor_incremental_limit
+            ):
+                incremental[edge] -= step
+                blocked[edge] = True
+        if inc >= config.corridor_max_iter:
+            return None
+        return x - incremental[0], y - incremental[2], x + incremental[1], y + incremental[3]
+
+    def _build_vertex_corridor_constraints(
+        self,
+        guess: FullStates,
+        config: PlannerConfig,
+        *,
+        radius: float = 0.3,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Build C++ ``Plan`` style repeated vertex corridor bounds."""
+        vertices_nvar = config.vehicle.vertices * 2
+        lb = np.full((len(guess.states), vertices_nvar), -np.inf, dtype=float)
+        ub = np.full((len(guess.states), vertices_nvar), np.inf, dtype=float)
+        for row, state in enumerate(guess.states):
+            centre = config.vehicle.formation_centre(state.x, state.y, state.theta)
+            box = self._generate_corridor_box(centre, radius, config)
+            if box is None:
+                return None
+            xmin, ymin, xmax, ymax = box
+            for vertex in range(config.vehicle.vertices):
+                lb[row, 2 * vertex] = xmin
+                lb[row, 2 * vertex + 1] = ymin
+                ub[row, 2 * vertex] = xmax
+                ub[row, 2 * vertex + 1] = ymax
+        return lb, ub
+
+    def plan_single(
+        self,
+        prev_sol: FullStates,
+        start: TrajectoryPoint,
+        goal: TrajectoryPoint,
+        *,
+        config: PlannerConfig | None = None,
+        hyperparam_set: list[list[list[float]]] | None = None,
+        max_search_time: float = 30.0,
+        max_expansions: int = 200000,
+        solver_maxiter: int = 200,
+        solver_method: str = "L-BFGS-B",
+    ) -> PlanResult:
+        """Reproduce C++ ``FormationPlanner::Plan`` without ROS visualization."""
+        cfg = PlannerConfig() if config is None else config
+        hyperparam_set = hyperparam_set or []
+        guess = self.stitch_previous_solution(prev_sol, start)
+        coarse_time = 0.0
+        if len(guess.states) < 3 or not self.check_guess_feasibility(guess, cfg):
+            coarse_start = time.perf_counter()
+            planner = CoarsePathPlanner(
+                self.map2d,
+                cfg,
+                max_search_time=max_search_time,
+                max_expansions=max_expansions,
+            )
+            path = planner.plan(Pose2D(start.x, start.y, start.theta), Pose2D(goal.x, goal.y, goal.theta), hyperparam_set)
+            coarse_time = time.perf_counter() - coarse_start
+            if not path:
+                return PlanResult(guess, guess, None, coarse_time, 0.0, np.inf, False, "coarse_path_failed")
+            guess = self.generate_guess_from_path(path, start, config=cfg)
+
+        corridor = self._build_vertex_corridor_constraints(guess, cfg)
+        if corridor is None:
+            return PlanResult(guess, guess, None, coarse_time, 0.0, np.inf, False, "corridor_box_failed")
+        corridor_lb, corridor_ub = corridor
+        constraints = Constraints(start=start, goal=goal, corridor_lb=corridor_lb, corridor_ub=corridor_ub)
+        solution = solve_single_robot(
+            constraints,
+            guess,
+            config=cfg,
+            w_inf=cfg.opti_w_penalty0,
+            maxiter=solver_maxiter,
+            method=solver_method,
+        )
+        reason = (
+            "infeasibility_above_tolerance"
+            if solution.infeasibility > cfg.opti_varepsilon_tol
+            else "completed"
+        )
+        return PlanResult(
+            solution.state,
+            guess,
+            solution,
+            coarse_time,
+            solution.solve_time,
+            solution.infeasibility,
+            True,
+            reason,
+        )
+
+    @staticmethod
+    def _tracking_errors(reference: FullStates, result: FullStates) -> tuple[float, float]:
+        errors = [
+            float(np.hypot(ref.x - state.x, ref.y - state.y))
+            for ref, state in zip(reference.states, result.states)
+        ]
+        if not errors:
+            return 0.0, 0.0
+        return max(errors), float(sum(errors) / len(errors))
+
+    def plan_diff_drive(
+        self,
+        guess: FullStates,
+        prev_sol: FullStates,
+        start: TrajectoryPoint,
+        goal: TrajectoryPoint,
+        *,
+        config: PlannerConfig | None = None,
+        solver_maxiter: int = 200,
+        solver_method: str = "L-BFGS-B",
+    ) -> ReplanResult:
+        """Reproduce C++ ``FormationPlanner::Plan_diff_drive`` wrapper."""
+        cfg = PlannerConfig() if config is None else config
+        constraints = Constraints(start=start, goal=goal)
+        solution = solve_diff_drive(
+            constraints,
+            guess,
+            prev_sol,
+            config=cfg,
+            w_inf=cfg.opti_w_penalty0,
+            maxiter=solver_maxiter,
+            method=solver_method,
+        )
+        max_error, avg_error = self._tracking_errors(guess, solution.state)
+        reason = (
+            "infeasibility_above_tolerance"
+            if solution.infeasibility > cfg.opti_varepsilon_tol
+            else "completed"
+        )
+        return ReplanResult(
+            solution.state,
+            solution,
+            solution.infeasibility,
+            solution.solve_time,
+            max_error,
+            avg_error,
+            True,
+            reason,
+        )
+
+    def plan_car_like_replan(
+        self,
+        guess: FullStates,
+        prev_sol: FullStates,
+        *,
+        config: PlannerConfig | None = None,
+        solver_maxiter: int = 200,
+        solver_method: str = "L-BFGS-B",
+    ) -> ReplanResult:
+        """Reproduce C++ ``FormationPlanner::Plan_car_like_replan`` wrapper."""
+        cfg = PlannerConfig() if config is None else config
+        constraints = Constraints(start=guess.states[0], goal=guess.states[-1])
+        solution = solve_replan(
+            constraints,
+            guess,
+            prev_sol,
+            config=cfg,
+            w_inf=cfg.opti_w_penalty0,
+            maxiter=solver_maxiter,
+            method=solver_method,
+        )
+        max_error, avg_error = self._tracking_errors(guess, solution.state)
+        if solution.infeasibility > 0.1:
+            reason = "trajectory_needs_refinement"
+        elif solution.infeasibility > cfg.opti_varepsilon_tol:
+            reason = "infeasibility_above_tolerance"
+        else:
+            reason = "completed"
+        return ReplanResult(
+            solution.state,
+            solution,
+            solution.infeasibility,
+            solution.solve_time,
+            max_error,
+            avg_error,
+            True,
+            reason,
+        )
+
+    @staticmethod
+    def plan_car_like(
+        traj_lead: FullStates,
+        offset: float,
+        config: PlannerConfig | None = None,
+    ) -> FullStates:
+        """Port C++ ``FormationPlanner::Plan_car_like`` follower generation."""
+        cfg = PlannerConfig() if config is None else config
+        if not traj_lead.states:
+            return FullStates(tf=traj_lead.tf)
+        dt = traj_lead.tf / len(traj_lead.states)
+        follower_states: list[TrajectoryPoint] = []
+        for lead in traj_lead.states:
+            follower_states.append(
+                TrajectoryPoint(
+                    x=float(lead.x + offset * np.sin(lead.theta)),
+                    y=float(lead.y - offset * np.cos(lead.theta)),
+                    theta=lead.theta,
+                    v=float((1.0 + offset * np.tan(lead.phi) / cfg.vehicle.wheel_base) * lead.v),
+                    phi=float(
+                        np.arctan(
+                            cfg.vehicle.wheel_base
+                            * np.tan(lead.phi)
+                            / (cfg.vehicle.wheel_base + offset * lead.phi)
+                        )
+                    ),
+                )
+            )
+        for i in range(1, len(follower_states) - 1):
+            follower_states[i].a = float((traj_lead.states[i].v - traj_lead.states[i - 1].v) / dt)
+            follower_states[i].omega = float((traj_lead.states[i].phi - traj_lead.states[i - 1].phi) / dt)
+        follower_states[0].a = traj_lead.states[0].a
+        follower_states[0].omega = traj_lead.states[0].omega
+        follower_states[-1].a = traj_lead.states[-1].a
+        follower_states[-1].omega = traj_lead.states[-1].omega
+        return FullStates(tf=traj_lead.tf, states=follower_states)
+
+    @staticmethod
+    def check_car_kinematic(
+        current_result: FullStates,
+        offset_car: list[float],
+        config: PlannerConfig | None = None,
+    ) -> bool:
+        """Port C++ ``FormationPlanner::CheckCarKinematic`` velocity check."""
+        cfg = PlannerConfig() if config is None else config
+        for offset in offset_car:
+            for state in current_result.states:
+                if state.phi >= 0.0:
+                    current_ref_vel = state.v * (1.0 + offset * state.phi / cfg.vehicle.wheel_base)
+                    if current_ref_vel > cfg.vehicle.max_velocity:
+                        return False
+        return True
+
+    @staticmethod
+    def check_diff_drive_kinematic(
+        current_result: FullStates,
+        offset: list[float],
+        re_phi: list[float],
+        config: PlannerConfig | None = None,
+    ) -> bool:
+        """Port C++ ``FormationPlanner::CheckDiffDriveKinematic``."""
+        cfg = PlannerConfig() if config is None else config
+        if len(offset) != len(re_phi):
+            raise ValueError("offset and re_phi must have the same length")
+        if len(current_result.states) < 2:
+            return True
+        dt = current_result.tf / len(current_result.states)
+        for offset_value, re_phi_value in zip(offset, re_phi):
+            for i in range(1, len(current_result.states)):
+                prev = current_result.states[i - 1]
+                curr = current_result.states[i]
+                prev_point = np.array(
+                    [
+                        prev.x + offset_value * np.cos(prev.theta - re_phi_value),
+                        prev.y + offset_value * np.sin(prev.theta - re_phi_value),
+                    ],
+                    dtype=float,
+                )
+                curr_point = np.array(
+                    [
+                        curr.x + offset_value * np.cos(curr.theta - re_phi_value),
+                        curr.y + offset_value * np.sin(curr.theta - re_phi_value),
+                    ],
+                    dtype=float,
+                )
+                if float(np.linalg.norm(curr_point - prev_point) / dt) > cfg.vehicle.max_velocity:
+                    return False
+        return True
 
     def generate_corridor_constraints(
         self,
@@ -363,6 +796,7 @@ class FormationPlanner:
         max_warm_start: int = 15,
         initial_warm_starts: int = 5,
         solver_maxiter: int = 200,
+        solver_method: str = "L-BFGS-B",
         enforce_cpp_early_return: bool = False,
     ) -> PlanFmResult:
         """Reproduce the core C++ ``Plan_fm`` loop from existing guesses.
@@ -395,6 +829,7 @@ class FormationPlanner:
                     corridor_cons=corridor_cons,
                     height_cons=height_cons_set.tolist(),
                     w_inf=cfg.opti_w_penalty0,
+                    method=solver_method,
                     maxiter=solver_maxiter,
                 )
                 history.append(solution)
@@ -445,6 +880,7 @@ class FormationPlanner:
                 corridor_cons=corridor_cons,
                 height_cons=height_cons_set.tolist(),
                 w_inf=cfg.opti_w_penalty0,
+                method=solver_method,
                 maxiter=solver_maxiter,
             )
             history.append(solution)

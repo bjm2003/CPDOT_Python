@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 NVAR = 7
-CPDOT_FORMATION_ROBOTS = 5
+CPDOT_FORMATION_ROBOTS = 3
 
 
 @dataclass
@@ -60,3 +60,5 @@ class Constraints:
 
     start: TrajectoryPoint
     goal: TrajectoryPoint
+    corridor_lb: np.ndarray | None = None
+    corridor_ub: np.ndarray | None = None
