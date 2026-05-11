@@ -5,7 +5,7 @@
 CPDOT Python Reproduction 是对论文 **Multi-Nonholonomic Robot Object
 Transportation with Obstacle Crossing using a Deformable Sheet** 中核心规划
 流程的 Python 复现。项目包含算法实现、测试、可视化脚本和从 C++ 输出提取的
-fixture 数据，不包含原 C++/ROS 工程源码和 catkin 编译产物。
+fixture 数据。
 
 默认配置为 3 车编队，支持 `N in [3, 7]`。论文流程相关实验建议使用
 `--mode source --source-solver-method ipopt`。
